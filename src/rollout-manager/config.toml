@@ -1,0 +1,18 @@
+# Rollout Manager Configuration
+# All parameters are required and must be provided via command line, this config file, or REST API
+
+# Mooncake transfer device name (e.g., mlx5_0 for InfiniBand)
+mooncake_transfer_device_name = ""
+
+# Mooncake transfer protocol (e.g., rdma, tcp)
+mooncake_transfer_protocol = "tcp"
+
+# Bind address for the rollout manager
+bind_addr = "0.0.0.0:5000"
+
+# Weight sender RPyC endpoints
+# These will be automatically populated by the training script
+# but can be manually configured here
+weight_sender_rpyc_endpoints = [
+    # Add your weight sender endpoints here
+] 

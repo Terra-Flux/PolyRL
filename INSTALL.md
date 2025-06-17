@@ -35,7 +35,7 @@ Install
 ```bash
 conda install -c conda-forge libcurl # for mooncake-transfer-engine
 
-pip cache purge # recommended to make sure flash attn is rebuilt
+pip cache purge # (recommended) make sure flash attn is rebuilt and compatible with torch
 
 pip install flash_attn==2.7.4.post1 --no-build-isolation
 pip install rpyc==6.0.2 mooncake-transfer-engine==0.3.2.post1 --no-build-isolation

@@ -31,9 +31,6 @@ RUN pip install --no-cache-dir \
     mooncake-transfer-engine==0.3.2.post1 \
     flash_attn==2.7.4.post1 --no-build-isolation
 
-# Verify nvidia-smi is available (will only work when container runs with GPU access)
-RUN which nvidia-smi && echo "nvidia-smi found at: $(which nvidia-smi)"
-
 # Expose ports
 EXPOSE 8080 7000 6000 5000
 

@@ -1,10 +1,17 @@
-# To run PolyRL training pipeline
+# PolyRL training pipeline
 
-# NOTE:
+## NOTE:
 
 1. Make sure `port` is different for each rollout instance.
 2. Make sure the `mooncake_handshake_port` is far enough for each rollout instance.
 
+## To prepare dataset
+
+Take GSM8K as an example. Reuse the code from VeRL.
+
+```bash
+python3 src/verl/examples/data_preprocess/gsm8k.py --local_dir "path/to/gsm8k/data"
+```
 
 # To launch the training process
 

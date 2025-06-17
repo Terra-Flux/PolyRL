@@ -40,5 +40,5 @@ This is a demo Dockerfile for the development purpose. You have to run training 
 
 ```bash
 docker build -t polyrl -f docker/Dockerfile.demo .
-docker run -it polyrl
+docker run --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -it polyrl
 ```

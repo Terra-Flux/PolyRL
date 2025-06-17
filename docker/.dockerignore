@@ -1,0 +1,47 @@
+**/*.pt
+**/checkpoints
+**/wget-log
+**/_build/
+**/*.ckpt
+**/outputs
+**/*.tar.gz
+**/playground
+**/wandb
+
+# Ignore common development files
+.git/
+.gitignore
+*.pyc
+__pycache__/
+.pytest_cache/
+.coverage
+*.egg-info/
+
+# Ignore large files and directories
+*.tar.gz
+*.zip
+*.pkl
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+models/
+checkpoints/
+logs/
+wandb/
+.cache/
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore temporary files
+tmp/
+temp/
+*.tmp 

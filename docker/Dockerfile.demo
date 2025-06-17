@@ -1,0 +1,43 @@
+# Use NVIDIA PyTorch container as base image
+# This container includes Ubuntu 24.04, Python 3.12, CUDA 12.8.0, PyTorch 2.6.0a0+ecf3bae40a
+FROM nvcr.io/nvidia/pytorch:25.01-py3
+
+# Set working directory
+WORKDIR /workspace
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust (required for some dependencies)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Copy necessary files
+COPY README.md /workspace/README.md
+COPY LICENSE /workspace/LICENSE
+COPY src/ /workspace/src/
+COPY examples/ /workspace/examples/
+
+# Install sglang
+RUN cd /workspace/src/sglang && \
+    pip install -e "python[all]"
+
+# Install verl
+RUN cd /workspace/src/verl && \
+    pip install -e .
+
+# Install other dependencies
+RUN pip install flash_attn==2.7.4.post1 --no-build-isolation && \
+    pip install rpyc==6.0.2 mooncake-transfer-engine==0.3.2.post1
+
+# Install libcurl via conda (already available in the container environment)
+# RUN conda install -c conda-forge libcurl -y
+
+# Expose commonly used ports for ML services
+EXPOSE 8080 7000 6000 5000
+
+# Set default command
+CMD ["/bin/bash"]

@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -47,6 +49,28 @@ pub struct Instance {
     pub endpoint: String, // full url prefix like http://host:port
     pub mooncake_handshake_endpoint: Option<String>, // host:port for mooncake handshake
 }
+
+// elastic support utils
+// local instance
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalInstance {
+    pub id: Uuid,
+    pub endpoint: String,
+}
+
+
+#[derive(Clone)]
+pub struct RemoteInstanceState {
+    pub instance: Instance,
+    pub pending_requests: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+pub struct LocalInstanceState {
+    pub instance: LocalInstance,
+    pub pending_requests: Arc<AtomicUsize>,
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

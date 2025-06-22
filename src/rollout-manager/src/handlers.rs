@@ -308,3 +308,73 @@ pub async fn shutdown_instances_handler(
     
     (StatusCode::OK, Json(response))
 }
+
+// elastic support utils
+
+
+pub fn build_partial_current_response(
+    is_batch_input: bool,
+    current_received_responses: &Vec<Option<serde_json::Value>>,
+) -> serde_json::Value {
+    if is_batch_input {
+        serde_json::json!(
+            current_received_responses
+                .iter()
+                .map(|r| r.clone().unwrap_or(serde_json::json!({})))
+                .collect::<Vec<_>>()
+        )
+    } else {
+        current_received_responses
+            .get(0)
+            .and_then(|r| r.clone())
+            .unwrap_or(serde_json::json!({}))
+    }
+}
+
+pub fn merge_arrays(first: &serde_json::Value, second: &mut serde_json::Value, key_path: &[&str]) {
+    let mut first_val = first;
+    let mut second_val = second;
+    for (i, key) in key_path.iter().enumerate() {
+        if i == key_path.len() - 1 {
+            if let (Some(first_arr), Some(second_arr)) = (
+                first_val.get(key).and_then(|v| v.as_array()),
+                second_val.get_mut(key).and_then(|v| v.as_array_mut()),
+            ) {
+                let mut combined = first_arr.clone();
+                combined.extend(second_arr.clone());
+                second_val[key] = serde_json::json!(combined);
+            }
+        } else {
+            first_val = match first_val.get(key) {
+                Some(v) => v,
+                None => return,
+            };
+            second_val = match second_val.get_mut(key) {
+                Some(v) => v,
+                None => return,
+            };
+        }
+    }
+}
+
+pub fn merge_responses(first: &serde_json::Value, second: &mut serde_json::Value) {
+    merge_arrays(first, second, &["meta_info", "output_token_logprobs"]);
+    
+    let first_completion_tokens = first.get("meta_info")
+        .and_then(|m| m.get("completion_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+    
+    let second_completion_tokens = second.get("meta_info")
+        .and_then(|m| m.get("completion_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+    
+    let total_tokens = first_completion_tokens + second_completion_tokens;
+    
+    if let Some(meta_info) = second.get_mut("meta_info") {
+        if let Some(meta_obj) = meta_info.as_object_mut() {
+            meta_obj.insert("completion_tokens".to_string(), serde_json::json!(total_tokens));
+        }
+    }
+}

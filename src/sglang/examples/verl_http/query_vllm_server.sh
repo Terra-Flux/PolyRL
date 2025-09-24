@@ -31,24 +31,9 @@ curl http://localhost:40000/v1/chat/completions \
   }'
 
 # Example4: Query the server to generate text, must be launched with naive vLLM api server
-curl -X POST http://10.132.0.11:30001/generate \
+curl -X POST http://localhost:30002/generate \
     -H "Content-Type: application/json" \
     -d '{
         "prompt": "San Francisco is a",
-        "max_tokens": 100
-    }'
-
-# Example4: Query the server to generate text, must be launched with naive vLLM api server
-curl -X POST http://10.132.0.11:30001/generate \
-    -H "Content-Type: application/json" \
-    -d '{
-        "text": "San Francisco is a",
-        "max_tokens": 100
-    }'
-
-curl -X POST http://10.132.0.11:30000/generate \
-    -H "Content-Type: application/json" \
-    -d '{
-        "text": "San Francisco is a",
         "max_tokens": 100
     }'

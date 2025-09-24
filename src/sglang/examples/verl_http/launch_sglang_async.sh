@@ -4,7 +4,7 @@
 HOST=${1:-0.0.0.0}
 
 # port is either $2 or 30000
-PORT=${2:-30000}
+PORT=${2:-40000}
 
 # tp-size is either $3 or 1
 TP_SIZE=${3:-1}

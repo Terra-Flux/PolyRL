@@ -756,7 +756,6 @@ async def abort_request(obj: AbortReq, request: Request):
         _global_state.tokenizer_manager.abort_request(
             rid=obj.rid, abort_all=obj.abort_all
         )
-        
         return Response(status_code=200)
     except Exception as e:
         return _create_error_response(e)
@@ -1034,7 +1033,7 @@ def launch_server(
                     "port": server_args.port,
                     "mooncake_handshake_port": server_args.mooncake_handshake_port
                 }
-                res = requests.post(f"{rollout_mgr_url.rstrip('/')}/register_rollout_instance", json=reg_payload, timeout=100)
+                res = requests.post(f"{rollout_mgr_url.rstrip('/')}/register_rollout_instance", json=reg_payload, timeout=10)
                 if res.status_code == 200:
                     cfg = res.json()
                     # Update server args with returned mooncake-related configs
@@ -1046,10 +1045,6 @@ def launch_server(
                         key_json, attr = k
                         if key_json in cfg and hasattr(server_args, attr):
                             setattr(server_args, attr, cfg[key_json])
-                    
-                    # Store group selection information for weight receiver
-                    server_args.mooncake_sender_group_idx = cfg["sender_group_idx"]
-                    server_args.num_mooncake_engines_per_group = cfg["num_mooncake_engines_per_group"]
                     logger.info(f"Registered with rollout manager at {rollout_mgr_url}, got params: {cfg}")
                 else:
                     logger.warning(

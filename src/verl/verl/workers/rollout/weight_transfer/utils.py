@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional, Union
+from typing import List
 
 from .transfer_engine import MooncakeTransferEngineConfig
 
@@ -9,9 +9,9 @@ from .transfer_engine import MooncakeTransferEngineConfig
 class TransferAgentConfig:
     trainer_global_rank: int
     trainer_world_size: int
-    mooncake_config: Optional[Union[MooncakeTransferEngineConfig, str]] = None
+    mooncake_config: List[MooncakeTransferEngineConfig]
+    num_mooncake_engines_per_group: int = 1
     rpyc_bind_port: int = 18861
-    mooncake_handshake_port: int = None
 
 
 class TransferStatus(IntEnum):

@@ -1,4 +1,5 @@
 import logging
+import os
 import socket
 import threading
 import time
@@ -12,7 +13,7 @@ import rpyc
 import zmq
 from rpyc.utils.classic import obtain
 
-from .transfer_engine import MooncakeTransferEngine
+from .transfer_engine import MooncakeTransferEngine, MooncakeTransferEngineConfig, TCPTransferEngine
 from .utils import TransferAgentConfig, TransferStatus
 from ..utils import configure_logger
 
@@ -62,9 +63,11 @@ class TransferAgent:
         self.output_queue = output_queue
         self.config = config
         self.buffer: Optional[TransferBuffer] = None
-        self.mooncake_engine: Optional[MooncakeTransferEngine] = None
+        self.transfer_engines = []
+        self.buffer_slices: List[Tuple[int, int, int]] = []
         self.zmq_listener_port: Optional[int] = None
         self.zmq_thread: Optional[threading.Thread] = None
+        self.use_tcp_engine = os.environ.get('TRANSFER_ENGINE_TYPE', 'tcp').lower() == 'tcp'
         # sender rank -> info
         # FIXME(yongji): Now we only consider full weight sending
         # single sender to single/multiple receiver
@@ -72,22 +75,48 @@ class TransferAgent:
         # sender rank -> status
         self._transfer_status_queue: queue.Queue[Tuple[int, TransferStatus]] = queue.Queue()
 
-        self.initialize_mooncake_engine()
+        self.initialize_transfer_engines()
         self.start_zmq_server()
 
-    def initialize_mooncake_engine(self):
-        logger.info("Initializing Mooncake Transfer Engine...")
-        if isinstance(self.config.mooncake_config, str):
-            # config is provided as a path
-            self.mooncake_engine = MooncakeTransferEngine(
-                config_path=self.config.mooncake_config
+    def check_port_available(self, port: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', port))
+                return True
+        except:
+            return False
+
+    def initialize_transfer_engines(self):
+        base_config = self.config.mooncake_config
+        
+        if self.use_tcp_engine:
+            logger.info(f"Initializing TCP Transfer Engine with {self.config.num_mooncake_engines} parallel streams...")
+            engine_config = MooncakeTransferEngineConfig(
+                local_hostname=base_config.local_hostname,
+                protocol=base_config.protocol,
+                device_name=base_config.device_name,
+                handshake_port=base_config.handshake_port
             )
+            engine = TCPTransferEngine(config=engine_config, num_threads=self.config.num_mooncake_engines)
+            engine.is_receiver = True
+            self.transfer_engines.append(engine)
+            logger.info(f"Initialized TCP engine with {engine.num_parallel_streams} parallel streams")
         else:
-            # config is provided as an object
-            self.mooncake_engine = MooncakeTransferEngine(
-                config=self.config.mooncake_config
-            )
-        logger.info(f"Mooncake Engine initialized. Session ID: {self.get_session_id()}")
+            logger.info(f"Initializing {self.config.num_mooncake_engines} Mooncake Transfer Engines...")
+            for engine_idx in range(self.config.num_mooncake_engines):
+                engine_config = MooncakeTransferEngineConfig(
+                    local_hostname=base_config.local_hostname,
+                    protocol=base_config.protocol,
+                    device_name=base_config.device_name,
+                    handshake_port=base_config.handshake_port + engine_idx * 10
+                )
+                
+                if not self.check_port_available(engine_config.handshake_port):
+                    raise RuntimeError(f"Port {engine_config.handshake_port} is not available for Mooncake engine")
+                
+                engine = MooncakeTransferEngine(config=engine_config)
+                self.transfer_engines.append(engine)
+                logger.info(f"Initialized Mooncake engine {engine_idx} with handshake port {engine_config.handshake_port}, session ID: {engine.get_session_id()}")
 
     def find_free_port(self) -> int:
         """Find an available free port on the host."""
@@ -159,11 +188,37 @@ class TransferAgent:
             logger.warning("[Weight receiver] ZMQ server thread is already running.")
 
     def allocate_transfer_buffer(self, params: List[Tuple[str, torch.Tensor]]):
-        assert self.mooncake_engine is not None, "Mooncake Engine not initialized"
+        assert len(self.transfer_engines) > 0, "Transfer Engines not initialized"
         assert all(p[1].is_meta for p in params), "Meta tensors should be provided to compute buffer size"
         self.buffer = TransferBuffer(params)
         self.output_queue.put(self.buffer.buffer)
-        self.mooncake_engine.register(self.buffer.ptr, self.buffer.length)
+        
+        if self.use_tcp_engine:
+            # For TCP engine, register entire buffer to single engine
+            assert len(self.transfer_engines) == 1, "TCP engine should have single instance"
+            engine = self.transfer_engines[0]
+            engine.register(self.buffer.ptr, self.buffer.length)
+            self.buffer_slices.append((self.buffer.ptr, 0, self.buffer.length))
+            # Start the listener after registering buffer
+            engine.start_listener()
+        else:
+            num_engines = self.config.num_mooncake_engines
+            total_length = self.buffer.length
+            slice_size = total_length // num_engines
+            
+            for engine_idx, engine in enumerate(self.transfer_engines):
+                start_offset = engine_idx * slice_size
+                if engine_idx == num_engines - 1:
+                    end_offset = total_length
+                else:
+                    end_offset = (engine_idx + 1) * slice_size
+                
+                slice_length = end_offset - start_offset
+                slice_ptr = self.buffer.ptr + start_offset
+                
+                engine.register(slice_ptr, slice_length)
+                self.buffer_slices.append((slice_ptr, start_offset, slice_length))
+            logger.info(f"Registered buffer slice for engine {engine_idx}: offset={start_offset}, length={slice_length}")
 
     def get_local_ip(self) -> str:
         """Gets the local IP address used for outgoing connections."""
@@ -178,8 +233,8 @@ class TransferAgent:
             s.close()
         return ip
 
-    def register_with_sender(self):
-        assert self.mooncake_engine is not None, "Mooncake Engine not initialized"
+    def register_with_sender(self, sender_group_index: int = 0):
+        assert len(self.transfer_engines) > 0, "Mooncake Engines not initialized"
         assert self.buffer is not None, "Transfer buffer not allocated"
         assert self.zmq_port is not None, "ZMQ server not started or port not available"
 
@@ -199,24 +254,28 @@ class TransferAgent:
                 conn = retry(max_attempts=5)(rpyc.connect)(sender_address, sender_port, config={"allow_pickle": True})
                 logger.info(f"[Weight receiver] Connected to sender {sender_address}:{sender_port} RPyC server.")
 
+                session_ids = [engine.get_session_id() for engine in self.transfer_engines]
+                handshake_ports = [engine.get_rpc_port() for engine in self.transfer_engines]
+                
                 registration_info = {
                     "sglang_http_host": self.config.sglang_http_host,
                     "sglang_http_port": self.config.sglang_http_port,
-                    "mooncake_session_id": self.get_session_id(),
+                    "mooncake_session_ids": session_ids,
                     "buffer_ptr": self.buffer.ptr,
                     "buffer_length": self.buffer.length,
-                    "zmq_endpoint": zmq_endpoint, # Hostname/IP sender should connect to
-                    "zmq_port": self.zmq_port, # Port sender should connect to
-                    "mooncake_handshake_port": self.mooncake_engine.get_rpc_port() # Port for P2P handshake
+                    "zmq_endpoint": zmq_endpoint,
+                    "zmq_port": self.zmq_port,
+                    "mooncake_handshake_ports": handshake_ports,
+                    "sender_group_index": sender_group_index
                 }
-                logger.info(f"[Weight receiver] Registering with sender: {registration_info}")
+                logger.info(f"[Weight receiver] Registering with sender: session_ids={session_ids}, handshake_ports={handshake_ports}")
 
                 # Call the exposed method on the sender
                 response = conn.root.register_sglang_instance(**registration_info)
                 response = obtain(response)
                 conn.close()
 
-                if isinstance(response, dict) and response.get("trainer_session_id"):
+                if isinstance(response, dict) and response.get("trainer_session_ids"):
                     sender_rank = response["trainer_global_rank"]
                     self.sender_info[sender_rank] = response
                     logger.info(f"[Weight receiver] Successfully registered with sender. Received info: {self.sender_info}")
@@ -260,9 +319,9 @@ class TransferAgent:
             logger.error(f"Transfer agent event loop terminated: {e}")
             raise e
 
-    def get_session_id(self) -> str:
-        assert self.mooncake_engine is not None, "Mooncake Engine not initialized"
-        return self.mooncake_engine.get_session_id()
+    def get_session_ids(self) -> List[str]:
+        assert len(self.transfer_engines) > 0, "Mooncake Engines not initialized"
+        return [engine.get_session_id() for engine in self.transfer_engines]
 
 
 def _init(
@@ -279,7 +338,8 @@ def _init(
     weights_meta_tensors = input_queue.get()
     transfer_agent.allocate_transfer_buffer(weights_meta_tensors)
     logger.info("Transfer buffer allocated and placed in output queue.")
-    if not transfer_agent.register_with_sender():
+    sender_group_index = server_args.mooncake_sender_group_idx
+    if not transfer_agent.register_with_sender(sender_group_index):
          raise RuntimeError("Failed to register with sender RPyC server.")
 
     event.set()

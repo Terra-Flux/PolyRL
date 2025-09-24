@@ -36,6 +36,8 @@ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import (
     GetWeightsByNameReqInput,
     InitWeightsUpdateGroupReqInput,
+    LoadLoRAAdapterReqInput,
+    UnloadLoRAAdapterReqInput,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
@@ -43,9 +45,11 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromAgentReqInput,
 )
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch, global_server_args_dict
-from sglang.srt.mem_cache.memory_pool import ReqToTokenPool, TokenToKVPoolAllocator
+from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
+from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_executor.model_runner import ModelRunner
+from sglang.srt.patch_torch import monkey_patch_torch_reductions
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import MultiprocessingSerializer, broadcast_pyobj, set_random_seed
 
@@ -64,17 +68,19 @@ class TpModelWorker:
         server_args: ServerArgs,
         gpu_id: int,
         tp_rank: int,
+        moe_ep_rank: int,
         pp_rank: int,
         dp_rank: Optional[int],
         nccl_port: int,
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
-        token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None,
+        token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
     ):
         # Parse args
         self.server_args = server_args  # polyrl-dev: Save server_args for later use
         self.tp_size = server_args.tp_size
         self.tp_rank = tp_rank
+        self.moe_ep_rank = moe_ep_rank
         self.pp_rank = pp_rank
 
         # Init model and tokenizer
@@ -94,6 +100,8 @@ class TpModelWorker:
             gpu_id=gpu_id,
             tp_rank=tp_rank,
             tp_size=server_args.tp_size,
+            moe_ep_rank=moe_ep_rank,
+            moe_ep_size=server_args.ep_size,
             pp_rank=pp_rank,
             pp_size=server_args.pp_size,
             nccl_port=nccl_port,
@@ -139,6 +147,10 @@ class TpModelWorker:
             self.model_runner.req_to_token_pool.size,
         )
         assert self.max_running_requests > 0, "max_running_request is zero"
+        self.max_queued_requests = server_args.max_queued_requests
+        assert (
+            self.max_running_requests > 0
+        ), "max_queued_requests is zero. We need to be at least 1 to schedule a request."
         self.max_req_len = min(
             self.model_config.context_len - 1,
             self.max_total_num_tokens - 1,
@@ -160,18 +172,29 @@ class TpModelWorker:
         # A reference make this class has the same member as TpModelWorkerClient
         self.worker = self
 
+        self.hicache_layer_transfer_counter = None
+
         # polyrl-dev
         if server_args.enable_weight_transfer_agent:
             self.weight_receiver_config = self._build_weight_receiver_config(server_args)
             self.weight_receiver_agent = None
             self.weight_receiver_agent_queues = None
             self.weight_receiver_agent_buffer = None
+            self.weight_transfer_chunk_size = int(os.getenv('WEIGHT_TRANSFER_CHUNK_SIZE', 2 * 1024 * 1024 * 1024))
+
+    def register_hicache_layer_transfer_counter(self, counter):
+        self.hicache_layer_transfer_counter = counter
+
+    def set_hicache_consumer(self, consumer_index):
+        if self.hicache_layer_transfer_counter is not None:
+            self.hicache_layer_transfer_counter.set_consumer(consumer_index)
 
     def get_worker_info(self):
         return (
             self.max_total_num_tokens,
             self.max_prefill_tokens,
             self.max_running_requests,
+            self.max_queued_requests,
             self.max_req_len,
             self.max_req_input_len,
             self.random_seed,
@@ -180,6 +203,20 @@ class TpModelWorker:
             self.model_runner.req_to_token_pool.size,
             self.model_runner.req_to_token_pool.max_context_len,
             self.model_runner.token_to_kv_pool.size,
+        )
+
+    @property
+    def sliding_window_size(self) -> Optional[int]:
+        return self.model_runner.sliding_window_size
+
+    @property
+    def is_hybrid(self) -> bool:
+        return self.model_runner.is_hybrid is not None
+
+    def get_tokens_per_layer_info(self):
+        return (
+            self.model_runner.full_max_total_num_tokens,
+            self.model_runner.swa_max_total_num_tokens,
         )
 
     def get_pad_input_ids_func(self):
@@ -267,11 +304,13 @@ class TpModelWorker:
         self, recv_req: UpdateWeightsFromDistributedReqInput
     ):
         success, message = self.model_runner.update_weights_from_distributed(
-            recv_req.name, recv_req.dtype, recv_req.shape
+            recv_req.names, recv_req.dtypes, recv_req.shapes, recv_req.group_name
         )
         return success, message
 
     def update_weights_from_tensor(self, recv_req: UpdateWeightsFromTensorReqInput):
+
+        monkey_patch_torch_reductions()
         success, message = self.model_runner.update_weights_from_tensor(
             named_tensors=MultiprocessingSerializer.deserialize(
                 recv_req.serialized_named_tensors[self.tp_rank]
@@ -301,24 +340,54 @@ class TpModelWorker:
             status = self.weight_receiver_agent_queues[1].get()
             if status != "completed":
                 raise RuntimeError(f"Weight receive failed or unexpected status: {status}")
+        
         if self.tp_rank == 0:
-            named_tensors = self._construct_received_weights(tensors_meta)
-            for name, tensor in named_tensors:
-                tensor = tensor.to(self.device)
-                torch.distributed.broadcast(tensor, src=0, group=self.world_group.device_group)
+            tensor_metadata = self._get_tensor_metadata_with_offsets(tensors_meta)
+            chunks = self._group_tensors_into_chunks(tensor_metadata, self.weight_transfer_chunk_size)
+            
+            for chunk in chunks:
+                min_offset = min(meta['offset'] for meta in chunk)
+                max_offset_end = max(meta['offset'] + meta['size_in_bytes'] for meta in chunk)
+                chunk_size = max_offset_end - min_offset
+                
+                chunk_buffer = self.weight_receiver_agent_buffer[min_offset:max_offset_end]
+                gpu_chunk = chunk_buffer.to(self.device)
+                torch.distributed.broadcast(gpu_chunk, src=0, group=self.world_group.device_group)
+                
+                chunk_tensors = []
+                for meta in chunk:
+                    relative_offset = meta['offset'] - min_offset
+                    buffer_slice = gpu_chunk[relative_offset:relative_offset + meta['size_in_bytes']]
+                    tensor = buffer_slice.view(meta['dtype']).view(*meta['shape'])
+                    chunk_tensors.append((meta['name'], tensor))
+                
                 success, message = self.model_runner.update_weights_from_tensor(
-                    named_tensors=[(name, tensor)],
+                    named_tensors=chunk_tensors,
                     load_format=recv_req.load_format,
                     unwrap_tensor=False,
                 )
                 assert success
         else:
-            for name, (shape, dtype) in tensors_meta:
-                dtype = getattr(torch, dtype)
-                tensor = torch.empty(shape, dtype=dtype, device=self.device)
-                torch.distributed.broadcast(tensor, src=0, group=self.world_group.device_group)
+            tensor_metadata = self._get_tensor_metadata_with_offsets(tensors_meta)
+            chunks = self._group_tensors_into_chunks(tensor_metadata, self.weight_transfer_chunk_size)
+            
+            for chunk in chunks:
+                min_offset = min(meta['offset'] for meta in chunk)
+                max_offset_end = max(meta['offset'] + meta['size_in_bytes'] for meta in chunk)
+                chunk_size = max_offset_end - min_offset
+                
+                gpu_chunk = torch.empty(chunk_size, dtype=torch.uint8, device=self.device)
+                torch.distributed.broadcast(gpu_chunk, src=0, group=self.world_group.device_group)
+                
+                chunk_tensors = []
+                for meta in chunk:
+                    relative_offset = meta['offset'] - min_offset
+                    buffer_slice = gpu_chunk[relative_offset:relative_offset + meta['size_in_bytes']]
+                    tensor = buffer_slice.view(meta['dtype']).view(*meta['shape'])
+                    chunk_tensors.append((meta['name'], tensor))
+                
                 success, message = self.model_runner.update_weights_from_tensor(
-                    named_tensors=[(name, tensor)],
+                    named_tensors=chunk_tensors,
                     load_format=recv_req.load_format,
                     unwrap_tensor=False,
                 )
@@ -330,6 +399,17 @@ class TpModelWorker:
             recv_req.name, recv_req.truncate_size
         )
         return parameter
+
+    def load_lora_adapter(self, recv_req: LoadLoRAAdapterReqInput):
+        result = self.model_runner.load_lora_adapter(recv_req.to_ref())
+        return result
+
+    def unload_lora_adapter(self, recv_req: UnloadLoRAAdapterReqInput):
+        result = self.model_runner.unload_lora_adapter(recv_req.to_ref())
+        return result
+
+    def can_run_lora_batch(self, lora_ids: list[str]) -> bool:
+        return self.model_runner.lora_manager.validate_lora_batch(lora_ids)
 
     # polyrl-dev
     def _build_weight_receiver_config(self, server_args: ServerArgs):
@@ -348,10 +428,10 @@ class TpModelWorker:
         config = TransferAgentConfig(
             sender_rpyc_endpoints=sender_rpyc_endpoints,
             mooncake_config=mooncake_config,
+            num_mooncake_engines=server_args.num_mooncake_engines_per_group,
             sglang_http_host=server_args.host,
             sglang_http_port=server_args.port,
             zmq_bind_host=server_args.weight_receiver_zmq_bind_host,
-            mooncake_handshake_port=server_args.mooncake_handshake_port,
         )
         return config
     
@@ -364,6 +444,8 @@ class TpModelWorker:
             self.weight_receiver_config.mooncake_config.protocol == 'tcp':
             create_tcp_topology_json()
         
+        os.environ["MC_FORCE_TCP"] = "1"
+        os.environ["MC_LEGACY_RPC_PORT_BINDING"] = "1"
         mp.set_start_method('spawn', force=True)
         input_queue = mp.Queue()
         output_queue = mp.Queue()
@@ -396,6 +478,55 @@ class TpModelWorker:
             named_tensors.append((name, tensor))
             offset += size_in_bytes
         return named_tensors
+
+    # polyrl-dev
+    def _get_tensor_metadata_with_offsets(self, tensors_meta):
+        offset = 0
+        tensor_metadata = []
+        for name, (shape, dtype) in tensors_meta:
+            size = 1
+            for dim in shape:
+                size *= dim
+            dtype_obj = getattr(torch, dtype)
+            elem_size = torch.finfo(dtype_obj).bits // 8
+            size_in_bytes = size * elem_size
+            tensor_metadata.append({
+                'name': name,
+                'shape': shape,
+                'dtype': dtype_obj,
+                'offset': offset,
+                'size_in_bytes': size_in_bytes
+            })
+            offset += size_in_bytes
+        return tensor_metadata
+
+    # polyrl-dev
+    def _group_tensors_into_chunks(self, tensor_metadata, chunk_size):
+        chunks = []
+        current_chunk = []
+        current_chunk_size = 0
+        
+        for tensor_meta in tensor_metadata:
+            tensor_size = tensor_meta['size_in_bytes']
+            
+            if tensor_size > chunk_size:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = []
+                    current_chunk_size = 0
+                chunks.append([tensor_meta])
+            elif current_chunk_size + tensor_size <= chunk_size:
+                current_chunk.append(tensor_meta)
+                current_chunk_size += tensor_size
+            else:
+                chunks.append(current_chunk)
+                current_chunk = [tensor_meta]
+                current_chunk_size = tensor_size
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        return chunks
 
 
 # polyrl-dev

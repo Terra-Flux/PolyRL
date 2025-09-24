@@ -38,7 +38,10 @@ class HttpEngineForRL(EngineBase):
         url = f"http://{self.server_args.host}:{self.server_args.port}/{endpoint}"
         response = requests.post(url, json=payload or {})
         response.raise_for_status()
-        return response.json()
+        try:
+            return response.json()
+        except:
+            return None
 
     def _make_get_request(self, endpoint: str):
         """Make a GET request to the specified endpoint.
@@ -155,14 +158,14 @@ class HttpEngineForRL(EngineBase):
     def release_memory_occupation(self):
         print(f"HttpEngineForRL releasing memory occupation...")
         # TODO: enable this after update model weights is implemented
-        # return self._make_post_request("release_memory_occupation")
-        return None
+        return self._make_post_request("release_memory_occupation")
+        # return None
     
     def resume_memory_occupation(self):
         print(f"HttpEngineForRL resuming memory occupation...")
         # TODO: enable this after update model weights is implemented
-        # return self._make_post_request("resume_memory_occupation")
-        return None
+        return self._make_post_request("resume_memory_occupation")
+        # return None
 
     def flush_cache(self):
         print(f"HttpEngineForRL flushing cache...")

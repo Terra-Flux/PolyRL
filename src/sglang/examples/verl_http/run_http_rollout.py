@@ -28,15 +28,9 @@ from sglang.test.test_utils import find_available_port
 # Predefined model and server configurations
 MODELS = [
     dict(
-        model_path="meta-llama/Llama-3.1-8B-Instruct", 
-        tokenizer_path="meta-llama/Llama-3.1-8B-Instruct",
-        tp_size=2,
-        host="localhost",
-        port=40000,
-    ),
-    dict(
-        model_path="Qwen/Qwen2.5-0.5B-Instruct",
-        tokenizer_path="Qwen/Qwen2.5-0.5B-Instruct",
+        model_path="Qwen/Qwen3-1.7B",
+        tokenizer_path="Qwen/Qwen3-1.7B",
+        enable_memory_saver=True,
         tp_size=2,
         host="localhost",
         port=40000,
@@ -67,7 +61,7 @@ def parse_arguments():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.8,
+        default=0.0,
         help="Sampling temperature",
     )
     parser.add_argument(
@@ -289,6 +283,9 @@ def main():
         # release and resume memory occupation
         print(f"\n===== Releasing Memory Occupation =====")
         engine.release_memory_occupation()
+        
+        import time
+        time.sleep(4)
         print(f"\n===== Resuming Memory Occupation =====")
         engine.resume_memory_occupation()
         
@@ -317,6 +314,8 @@ def main():
         print(f"Total time: {batch_stats['elapsed_time']:.2f} seconds")
         print(f"Tokens per second: {batch_stats['tokens_per_second']:.2f}")
         print(f"Number of prompts: {batch_stats['num_prompts']}")
+        
+        engine.flush_cache()
         
     except Exception as e:
         print(f"Error during batch generation: {str(e)}")

@@ -1,6 +1,8 @@
 RL(HF) algorithms with LoRA Support
 ===========================================
 
+Last updated: 06/05/2025.
+
 We support LoRA (Low-Rank Adaptation) for reinforcement learning algorithms such as PPO, GRPO, and others.
 
 LoRA is a parameter-efficient fine-tuning technique that injects trainable low-rank matrices into pre-trained weights (typically linear layers). This reduces memory footprint and compute cost, making it possible to fine-tune large models with limited hardware.
@@ -18,9 +20,9 @@ Usage Guide
 ------------------------
 1. Lora is available in the `verl.trainer.ppo.ray_trainer.RayPPOTrainer`. Examples are provided via the `verl.trainer.main_ppo` entry point.
 
-2. Currently, LoRA is supported via huggingface peft, only with fsdp and vllm backend (sglang support coming soon).
+2. Currently, LoRA is supported via huggingface peft, only with fsdp/fsdp2 and vllm backend (sglang support coming soon).
 
-- `strategy=fsdp`
+- `strategy=fsdp` or `strategy=fsdp2`
 - `rollout.name=vllm`
 
 3. Required configurations for LoRA:

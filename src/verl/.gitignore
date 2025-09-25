@@ -58,6 +58,8 @@ nosetests.xml
 coverage.xml
 *,cover
 .hypothesis/
+pytest.ini
+output.txt
 
 # Translations
 *.mo
@@ -123,5 +125,4 @@ ENV/
 logs
 log
 outputs
-
-default.etcd/
+.history

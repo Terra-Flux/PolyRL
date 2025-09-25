@@ -38,7 +38,6 @@ from verl.utils.fs import copy_to_local
 from verl.utils.hdfs_io import makedirs
 from verl.utils.model import compute_position_id_with_mask
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
-from verl.utils.device import is_cuda_available
 
 
 @hydra.main(config_path="config", config_name="generation", version_base=None)
@@ -82,11 +81,16 @@ def main_task(config):
 
     ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(ActorRolloutRefWorker), config=config, role="rollout")
     resource_pool = RayResourcePool(process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes)
-    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name="cuda" if is_cuda_available else "npu")
+    wg = RayWorkerGroup(
+        resource_pool=resource_pool,
+        ray_cls_with_init=ray_cls_with_init,
+        device_name=config.trainer.device,
+    )
     wg.init_model()
 
     total_samples = len(dataset)
     config_batch_size = config.data.batch_size
+    apply_chat_template_kwargs = config.data.get("apply_chat_template_kwargs", {})
     num_batch = -(-total_samples // config_batch_size)
     output_lst = [[] for _ in range(config.data.n_samples)]
 
@@ -102,6 +106,7 @@ def main_task(config):
             return_tensors="pt",
             return_dict=True,
             tokenize=True,
+            **apply_chat_template_kwargs,
         )
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]

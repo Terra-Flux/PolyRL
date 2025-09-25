@@ -17,13 +17,14 @@ the class for Worker
 
 import os
 import socket
+import warnings
 from dataclasses import dataclass
-from typing import Dict
 
 import ray
 
+from verl.utils.device import get_torch_device, get_visible_devices_keyword
+
 from .decorator import Dispatch, Execute, register
-from verl.utils.device import get_torch_device
 
 
 @dataclass
@@ -43,33 +44,28 @@ class DistGlobalInfo:
 
 
 class WorkerHelper:
-    def _get_node_ip(self):
-        def get_node_ip_by_sdk():
-            if os.getenv("WG_BACKEND", None) == "ray":
-                import ray
+    @staticmethod
+    def _get_node_ip():
+        if os.getenv("WG_BACKEND", None) == "ray":
+            return ray.util.get_node_ip_address()
+        else:
+            raise NotImplementedError("WG_BACKEND now just support ray mode.")
 
-                return ray._private.services.get_node_ip_address()
-            else:
-                raise NotImplementedError("WG_BACKEND now just support ray mode.")
-
-        host_ipv4 = os.getenv("MY_HOST_IP", None)
-        host_ipv6 = os.getenv("MY_HOST_IPV6", None)
-        host_ip_by_env = host_ipv4 or host_ipv6
-        host_ip_by_sdk = get_node_ip_by_sdk()
-
-        host_ip = host_ip_by_env or host_ip_by_sdk
-        return host_ip
-
-    def _get_free_port(self):
+    @staticmethod
+    def _get_free_port():
         with socket.socket() as sock:
             sock.bind(("", 0))
             return sock.getsockname()[1]
 
     def get_availale_master_addr_port(self):
-        return self._get_node_ip(), str(self._get_free_port())
+        warnings.warn(
+            "This function is deprecated due to typo in name; Please use `get_available_master_addr_port` instead",
+            stacklevel=2,
+        )
+        return self.get_available_master_addr_port()
 
-    def _get_pid(self):
-        return os.getpid()
+    def get_available_master_addr_port(self):
+        return self._get_node_ip().strip("[]"), str(self._get_free_port())
 
 
 # we assume that in each WorkerGroup, there is a Master Worker
@@ -101,6 +97,53 @@ class Worker(WorkerHelper):
 
         return instance
 
+    def _register_dispatch_collect_info(self, mesh_name: str, dp_rank: int, is_collect: bool):
+        """Register the dp_rank for a given mesh name. This function is meant to be called by the worker
+
+        Args:
+            mesh_name (str):
+                Name of the mesh to register dp_rank for.
+            dp_rank (int):
+                dp_rank to register for the given mesh name.
+            is_collect (bool):
+                Whether the dp_rank is used for collect.
+        """
+        if mesh_name in self.__dispatch_dp_rank or mesh_name in self.__collect_dp_rank:
+            raise ValueError(f"mesh_name {mesh_name} has been registered")
+        self.__dispatch_dp_rank[mesh_name] = dp_rank
+        self.__collect_dp_rank[mesh_name] = is_collect
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def _query_dispatch_info(self, mesh_name: str):
+        """Query the dispatch info for a given mesh name.
+
+        Args:
+            mesh_name (str):
+                Name of the mesh to query dispatch info for.
+
+        Returns:
+            int:
+                The dp_rank for the given mesh name.
+        """
+        assert mesh_name in self.__dispatch_dp_rank, f"{mesh_name} is not registered in {self.__class__.__name__}"
+        # note that each rank store its own dp_rank
+        return self.__dispatch_dp_rank[mesh_name]
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def _query_collect_info(self, mesh_name: str):
+        """Query the collect info for a given mesh name.
+
+        Args:
+            mesh_name (str):
+                Name of the mesh to query collect info for.
+
+        Returns:
+            bool:
+                Whether the dp_rank is used for collect.
+        """
+        assert mesh_name in self.__collect_dp_rank, f"{mesh_name} is not registered in {self.__class__.__name__}"
+        return self.__collect_dp_rank[mesh_name]
+
     def _configure_before_init(self, register_center_name: str, rank: int):
         """Configure worker settings before initialization.
 
@@ -113,7 +156,7 @@ class Worker(WorkerHelper):
         assert isinstance(rank, int), f"rank must be int, instead of {type(rank)}"
 
         if rank == 0:
-            master_addr, master_port = self.get_availale_master_addr_port()
+            master_addr, master_port = self.get_available_master_addr_port()
             rank_zero_info = {
                 "MASTER_ADDR": master_addr,
                 "MASTER_PORT": master_port,
@@ -122,7 +165,9 @@ class Worker(WorkerHelper):
             if os.getenv("WG_BACKEND", None) == "ray":
                 from verl.single_controller.base.register_center.ray import create_worker_group_register_center
 
-                self.register_center = create_worker_group_register_center(name=register_center_name, info=rank_zero_info)
+                self.register_center = create_worker_group_register_center(
+                    name=register_center_name, info=rank_zero_info
+                )
 
             os.environ.update(rank_zero_info)
         else:
@@ -134,7 +179,15 @@ class Worker(WorkerHelper):
     @classmethod
     def env_keys(cls):
         """The keys of the environment variables that are used to configure the Worker."""
-        return ["WORLD_SIZE", "RANK", "LOCAL_WORLD_SIZE", "LOCAL_RANK", "MASTER_ADDR", "MASTER_PORT", "CUDA_VISIBLE_DEVICES"]
+        return [
+            "WORLD_SIZE",
+            "RANK",
+            "LOCAL_WORLD_SIZE",
+            "LOCAL_RANK",
+            "MASTER_ADDR",
+            "MASTER_PORT",
+            get_visible_devices_keyword().upper(),
+        ]
 
     def __init__(self, cuda_visible_devices=None) -> None:
         """Initialize the worker with environment settings and device configuration.
@@ -143,17 +196,11 @@ class Worker(WorkerHelper):
             cuda_visible_devices (str, optional):
                 CUDA visible devices configuration. Defaults to None.
         """
-        # construct a meta from environment variable. Note that the import must be inside the class because it is executed remotely
+        # construct a meta from environment variable. Note that the import must be inside the class because
+        # it is executed remotely
         import os
 
-        import torch
-        from packaging import version
-        ###
-        # [SUPPORT AMD: torch]
-        if torch.cuda.is_available() and "AMD" in get_torch_device().get_device_name() and version.parse(ray.__version__) < version.parse("2.45.0"):
-            os.environ["CUDA_VISIBLE_DEVICES"] = os.environ.get("ROCR_VISIBLE_DEVICES")
-            os.environ["LOCAL_RANK"] = os.environ.get("RAY_LOCAL_RANK")
-        ###
+        self._setup_env_cuda_visible_devices()
 
         world_size = int(os.environ["WORLD_SIZE"])
         rank = int(os.environ["RANK"])
@@ -166,13 +213,6 @@ class Worker(WorkerHelper):
         local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
 
-        ###
-        # [SUPPORT AMD: torch]
-        if torch.cuda.is_available() and "AMD" in get_torch_device().get_device_name() and version.parse(ray.__version__) < version.parse("2.45.0"):
-            self.local_rank = int(os.environ["LOCAL_RANK"])
-            cuda_visible_devices = str(local_rank)
-        ###
-
         store = {
             "_world_size": world_size,
             "_rank": rank,
@@ -182,17 +222,13 @@ class Worker(WorkerHelper):
             "_master_port": master_port,
         }
         if cuda_visible_devices is not None:
-            store["_cuda_visible_devices"] = cuda_visible_devices
+            store[f"_{get_visible_devices_keyword()}".lower()] = cuda_visible_devices
 
         self._configure_with_store(store=store)
 
-        ###
-        # [SUPPORT AMD: torch]
-        if torch.cuda.is_available() and "AMD" in get_torch_device().get_device_name() and version.parse(ray.__version__) < version.parse("2.45.0"):
-            get_torch_device().set_device(int(cuda_visible_devices))
-        ###
-
         self.fused_worker_dict = {}
+        self.__dispatch_dp_rank = {}
+        self.__collect_dp_rank = {}
 
     def get_fused_worker_by_name(self, worker_name: str):
         """Get a fused worker by its name.
@@ -203,7 +239,58 @@ class Worker(WorkerHelper):
         """
         return self.fused_worker_dict.get(worker_name, None)
 
-    def _configure_with_store(self, store: Dict):
+    def _setup_env_cuda_visible_devices(self):
+        from verl.utils.ray_utils import ray_noset_visible_devices
+
+        is_ray_noset_visible_devices = ray_noset_visible_devices()
+
+        # Prevent use of clashing `{CUDA/HIP/ROCR}_VISIBLE_DEVICES``
+        rocr_val = os.environ.get("ROCR_VISIBLE_DEVICES", None)
+        hip_val = os.environ.get("HIP_VISIBLE_DEVICES", None)
+        cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        if hip_val:
+            # Switch the use of HIP_VISIBLE_DEVICES to CUDA_VISIBLE_DEVICES for consistency.
+            # Make sure that the HIP_VISIBLE_DEVICES is set to the same value as CUDA_VISIBLE_DEVICES
+            # at this point.
+            val = os.environ.pop("HIP_VISIBLE_DEVICES")
+            hip_val = None
+            if cuda_val:
+                assert val == cuda_val, (
+                    f"Please use the same HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES, inconsistant values "
+                    f"found: {val} and {cuda_val}."
+                )
+            else:
+                cuda_val = val
+                os.environ["CUDA_VISIBLE_DEVICES"] = val
+                # os.environ["HIP_VISIBLE_DEVICES"] = val
+
+        if rocr_val:
+            # You must take care if both HIP/CUDA and ROCR env vars are set as they have
+            # different meanings. Both env vars accept either a list of ints or a
+            # list of UUIDs. The ROCR env var is processed first which then reduces
+            # the number of GPUs that HIP can select from.
+            # https://github.com/pytorch/pytorch/pull/144026
+            # To avoid the complexity of this, we simply gives out error if both are set
+            # (Also to keep consistency with ray's practice with 2.45.0).
+            # Otherwise, we will set ROCR_VISIBLE_DEVICES to CUDA_VISIBLE_DEVICES
+            # and remove ROCR_VISIBLE_DEVICES.
+            if cuda_val:
+                raise ValueError("Please don't set ROCR_VISIBLE_DEVICES when HIP/CUDA_VISIBLE_DEVICES is set.")
+
+            cuda_val = os.environ.pop("ROCR_VISIBLE_DEVICES")
+            os.environ["CUDA_VISIBLE_DEVICES"] = cuda_val
+            rocr_val = None
+
+        if is_ray_noset_visible_devices:
+            # NOTE: Ray will automatically set the *_VISIBLE_DEVICES
+            # environment variable for each actor, unless
+            # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set,
+            # so we need to set local rank when the flag is set.
+            local_rank = os.environ.get("RAY_LOCAL_RANK")
+            os.environ["LOCAL_RANK"] = local_rank
+            get_torch_device().set_device(int(local_rank))
+
+    def _configure_with_store(self, store: dict):
         """
         This function should only be called inside by WorkerGroup
         """
@@ -215,7 +302,9 @@ class Worker(WorkerHelper):
             if val is not None:
                 # print(f"set {key} to {val}")
                 os.environ[key] = str(val)
-        os.environ["REDIS_STORE_SERVER_HOST"] = str(self._master_addr).replace("[", "").replace("]", "") if self._master_addr else ""
+        os.environ["REDIS_STORE_SERVER_HOST"] = (
+            str(self._master_addr).replace("[", "").replace("]", "") if self._master_addr else ""
+        )
 
     def get_master_addr_port(self):
         """Get the master address and port for distributed communication."""
@@ -225,8 +314,8 @@ class Worker(WorkerHelper):
         """Get the CUDA visible devices configuration."""
         import os
 
-        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "not set")
-        return cuda_visible_devices
+        visible_devices = os.environ.get(get_visible_devices_keyword().upper(), "not set")
+        return visible_devices
 
     @property
     def world_size(self):

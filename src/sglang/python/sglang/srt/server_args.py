@@ -297,6 +297,8 @@ class ServerArgs:
     weight_sender_rpyc_endpoint: str = ""
     weight_receiver_zmq_bind_host: str = "0.0.0.0"
     rollout_manager_address: Optional[str] = None
+    mooncake_sender_group_idx: int = 0
+    num_mooncake_engines_per_group: int = 1
 
     def __post_init__(self):
 
@@ -2064,6 +2066,18 @@ class ServerArgs:
             type=str,
             default=ServerArgs.rollout_manager_address,
             help="The address of the rollout manager",
+        )
+        parser.add_argument(
+            "--mooncake-sender-group-idx",
+            type=int,
+            default=ServerArgs.mooncake_sender_group_idx,
+            help="The sender group index for weight transfer",
+        )
+        parser.add_argument(
+            "--num-mooncake-engines-per-group",
+            type=int,
+            default=ServerArgs.num_mooncake_engines_per_group,
+            help="Number of mooncake engines per group",
         )
 
     @classmethod

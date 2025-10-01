@@ -7,6 +7,9 @@ mooncake_transfer_device_name = ""
 # Mooncake transfer protocol (e.g., rdma, tcp)
 mooncake_transfer_protocol = "tcp"
 
+# Maximum pending requests per instance for workload balancing
+max_pending_requests_per_instance = 10
+
 # Bind address for the rollout manager
 bind_addr = "0.0.0.0:5000"
 

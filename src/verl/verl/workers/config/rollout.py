@@ -164,4 +164,5 @@ class RolloutConfig(BaseConfig):
     
     rollout_manager: RolloutManagerConfig = field(default_factory=RolloutManagerConfig)
     
+    min_stream_batch_size: int = 0
 

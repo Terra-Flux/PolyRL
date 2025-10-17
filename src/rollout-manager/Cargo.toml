@@ -17,3 +17,7 @@ toml = "0.8"
 log = "0.4"
 env_logger = "0.10"
 dashmap = "6.0"
+axum-streams = { version = "0.21", features = ["json"] }
+futures = "0.3"
+tokio-stream = "0.1"
+async-stream = "0.3"

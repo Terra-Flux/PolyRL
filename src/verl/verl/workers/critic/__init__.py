@@ -14,5 +14,7 @@
 
 from .base import BasePPOCritic
 from .dp_critic import DataParallelPPOCritic
+# polyrl-dev
+from .stream_dp_critic import StreamDataParallelPPOCritic
 
-__all__ = ["BasePPOCritic", "DataParallelPPOCritic"]
+__all__ = ["BasePPOCritic", "DataParallelPPOCritic", "StreamDataParallelPPOCritic"]

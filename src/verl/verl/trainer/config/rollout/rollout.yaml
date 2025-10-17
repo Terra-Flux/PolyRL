@@ -299,3 +299,5 @@ rollout_manager:
 
   endpoint: null  # This will be automatically set by main_ppo.py, do not set manually
 
+# polyrl-dev: minimum unit the rollout iter returns, dividable by both sample_n and update_actor_microbatch.
+min_stream_batch_size: 0

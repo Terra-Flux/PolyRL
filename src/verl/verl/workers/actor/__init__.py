@@ -14,5 +14,7 @@
 
 from .base import BasePPOActor
 from .dp_actor import DataParallelPPOActor
+# polyrl-dev
+from .stream_dp_actor import StreamDataParallelPPOActor
 
-__all__ = ["BasePPOActor", "DataParallelPPOActor"]
+__all__ = ["BasePPOActor", "DataParallelPPOActor", "StreamDataParallelPPOActor"]

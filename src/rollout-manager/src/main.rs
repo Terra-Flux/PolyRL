@@ -3,6 +3,8 @@ mod state;
 mod config;
 mod handlers;
 mod instance_manager;
+mod balance;
+mod utils;
 
 use std::net::SocketAddr;
 use anyhow::Result;
@@ -16,7 +18,8 @@ use crate::config::{Args, load_config};
 use crate::state::AppState;
 use crate::handlers::*;
 
-#[tokio::main]
+// compiler automatically use physical core number
+#[tokio::main(flavor="multi_thread")]
 async fn main() -> Result<()> {
     // Initialize logger with custom format and info level as default
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -50,11 +53,16 @@ async fn main() -> Result<()> {
         .route("/health", get(health_check))
         .route("/get_instances_status", get(get_instances_status))
         .route("/register_rollout_instance", post(register_rollout_instance))
+        .route("/register_local_rollout_instances", post(register_local_rollout_instances))
         .route("/generate", post(generate_request))
-        .route("/update_weights_from_agent", post(update_weights_from_agent_handler))
+        .route("/batch_generate_requests", post(timed_batch_generate_requests))
+        .route("/update_weight_version", post(update_weight_version))
+        .route("/get_receive_instances", post(get_receive_instances))
+        .route("/update_weights", post(update_weights))
         .route("/update_weight_senders", put(update_weight_senders))
-        .route("/prepare_weight_update", post(prepare_weight_update))
         .route("/shutdown_instances", post(shutdown_instances_handler))
+        .route("/update_metrics", post(update_metrics))
+        .route("/abort_local_requests", post(abort_local_requests))
         .with_state(state);
 
     let addr: SocketAddr = args.bind_addr.parse()?;

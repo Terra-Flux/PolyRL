@@ -26,9 +26,8 @@ pip install -e .
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-conda install -c conda-forge libcurl # for mooncake-transfer-engine
+conda install -c conda-forge libcurl numactl 
 
-pip install flash_attn==2.7.4.post1 --no-build-isolation
-pip install rpyc==6.0.2 mooncake-transfer-engine==0.3.2.post1
+pip install flash_attn rpyc mooncake-transfer-engine --no-build-isolation
 ```
 

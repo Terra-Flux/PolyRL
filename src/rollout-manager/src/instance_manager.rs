@@ -3,7 +3,7 @@ use crate::models::Instance;
 use crate::state::AppState;
 
 pub async fn health_check_instance(state: AppState, instance: Instance) {
-    let endpoint = instance.endpoint.clone();
+    let endpoint = instance.endpoint();
     log::info!("Starting health check for instance: {}", endpoint);
     
     // Maximum wait time: 5 minutes
@@ -33,5 +33,5 @@ pub async fn health_check_instance(state: AppState, instance: Instance) {
     }
     
     log::warn!("Health check timed out for instance: {} after {} seconds", endpoint, max_wait_time.as_secs());
-    state.remove_from_pending(&endpoint);
+    state.remove_from_pending(&instance.addr);
 }

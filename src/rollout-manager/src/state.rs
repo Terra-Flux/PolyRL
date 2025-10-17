@@ -1,34 +1,53 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
-use dashmap::{DashMap, DashSet};
+
+use std::sync::{Arc, atomic::{AtomicUsize, AtomicBool, AtomicU64, Ordering}};
+use std::net::SocketAddr;
 use tokio::sync::{RwLock, Notify};
-use crate::models::{Instance, Config, InstanceInfo};
+use dashmap::{DashMap, DashSet};
+use crate::models::{Instance, Config};
+use crate::balance::LoadBalanceState;
+
+pub struct InstanceState {
+    pub instance: Instance,
+    pub pending_requests: AtomicUsize,
+    pub updating_weight: AtomicBool,
+    pub current_weight_version: AtomicU64,
+}
+
+pub struct LocalInstanceState {
+    pub instance: Instance,
+    pub pending_requests: AtomicUsize,
+}
 
 #[derive(Clone)]
 pub struct AppState {
-    // Using DashMap for concurrent access without RwLock
-    pub instances: Arc<DashMap<String, Instance>>, // endpoint -> Instance
-    pub pending_instances: Arc<DashSet<String>>, // endpoints currently being health checked
-    pub pending_shutdown: Arc<DashSet<String>>, // endpoints to be removed in next prepare round
+    // Core instance management
+    pub instances: Arc<DashMap<SocketAddr, InstanceState>>,
+    pub pending_instances: Arc<DashSet<SocketAddr>>,
+    
+    // Round-robin counter for load balancing
     pub rr_counter: Arc<AtomicUsize>,
+    
+    // Configuration
     pub config: Arc<RwLock<Config>>,
+    
+    // Weight sender management  
     pub weight_sender_counter: Arc<AtomicUsize>,
+    
+    // HTTP client
     pub client: reqwest::Client,
     
-    // For coordinating weight updates with instance registration
-    pub instance_registration_notify: Arc<Notify>,
+    pub instances_available_notify: Arc<Notify>, // For instance registration and availability
+    pub weight_sender_register_notify: Arc<Notify>, // For weight sender updates
     
-    // Track which instances are used for current generation and weight updates (unified)
-    pub active_instances: Arc<RwLock<Vec<Instance>>>,
+    // Active remote instances
+    pub latest_weight_version: Arc<AtomicU64>,
+    pub active_instances: Arc<RwLock<Vec<Instance>>>, // Active instances available for requests
     
-    // Track weight sender assignments
-    pub instance_weight_sender_map: Arc<DashMap<String, String>>, // instance_endpoint -> weight_sender_endpoint
+    // Local instances management
+    pub local_instances: Arc<DashMap<SocketAddr, LocalInstanceState>>,
     
-    // For waiting on weight senders
-    pub weight_sender_notify: Arc<Notify>,
-    
-    // Track prepare_weight_update round state
-    pub instances_frozen_for_round: Arc<AtomicBool>,
+    // Load balancing state
+    pub load_balance_state: Arc<LoadBalanceState>,
 }
 
 impl AppState {
@@ -36,7 +55,6 @@ impl AppState {
         Self {
             instances: Arc::new(DashMap::new()),
             pending_instances: Arc::new(DashSet::new()),
-            pending_shutdown: Arc::new(DashSet::new()),
             rr_counter: Arc::new(AtomicUsize::new(0)),
             config: Arc::new(RwLock::new(config)),
             weight_sender_counter: Arc::new(AtomicUsize::new(0)),
@@ -45,30 +63,83 @@ impl AppState {
                 .timeout(std::time::Duration::from_secs(3000))
                 .build()
                 .expect("failed building reqwest client"),
-            instance_registration_notify: Arc::new(Notify::new()),
+            instances_available_notify: Arc::new(Notify::new()),
+            weight_sender_register_notify: Arc::new(Notify::new()),
+            latest_weight_version: Arc::new(AtomicU64::new(0)),
             active_instances: Arc::new(RwLock::new(Vec::new())),
-            instance_weight_sender_map: Arc::new(DashMap::new()),
-            weight_sender_notify: Arc::new(Notify::new()),
-            instances_frozen_for_round: Arc::new(AtomicBool::new(false)),
+            local_instances: Arc::new(DashMap::new()),
+            load_balance_state: Arc::new(LoadBalanceState::new(50)),
         }
     }
 
-    pub async fn next_instance(&self) -> Option<Instance> {
-        let instances = self.active_instances.read().await;
-        if instances.is_empty() {
-            return None;
+
+    pub async fn next_instance_with_type(&self) -> Option<(Instance, bool)> {
+        // loop through active instances
+        loop {
+            let max_pending = {
+                let config = self.config.read().await;
+                config.max_pending_requests_per_instance
+            };
+            let active_instances = self.active_instances.read().await;
+            
+            let available_count = active_instances.len();
+                
+            if available_count == 0 {
+                drop(active_instances);
+                log::debug!("No available instances (all are shutting down), waiting for new instances");
+                self.instances_available_notify.notified().await;
+                continue;
+            }
+            
+            let start_idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % active_instances.len();
+            
+            if let Some(instance) = active_instances.iter()
+                .cycle()
+                .skip(start_idx)
+                .take(active_instances.len())
+                .find(|instance| {
+                    if let Some(instance_state) = self.instances.get(&instance.addr) {
+                        let pending = instance_state.pending_requests.load(Ordering::Relaxed);
+                        pending < max_pending
+                    } else if let Some(instance_state) = self.local_instances.get(&instance.addr) {
+                        let pending = instance_state.pending_requests.load(Ordering::Relaxed);
+                        pending < max_pending
+                    } else {
+                        log::warn!("{} is neither local or remote", instance.endpoint());
+                        false
+                    }
+                }) 
+            {
+                // if find a instance with pending < max_pending, return it
+                self.increment_pending_request(&instance.addr);
+                // NOTE: local instance doesn't have a mooncake_handshake_addr
+                if instance.mooncake_handshake_addr.is_some() {
+                    return Some((*instance, false));
+                } else {
+                    return Some((*instance, true));
+                }
+            }
+            
+            drop(active_instances);
+            // otherwise sleep until any request is done
+            log::debug!("All available instances at capacity (max: {}), waiting for availability", max_pending);
+            self.instances_available_notify.notified().await;
         }
-        let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % instances.len();
-        Some(instances[idx].clone())
     }
     
-    pub async fn get_next_weight_sender(&self) -> String {
+    pub async fn get_next_weight_sender(&self) -> (SocketAddr, usize, usize) {
         let config = self.config.read().await;
         if config.weight_sender_rpyc_endpoints.is_empty() {
             panic!("No weight sender endpoints available");
         }
-        let idx = self.weight_sender_counter.fetch_add(1, Ordering::Relaxed) % config.weight_sender_rpyc_endpoints.len();
-        config.weight_sender_rpyc_endpoints[idx].clone()
+        
+        let total_groups = config.weight_sender_rpyc_endpoints.len() * config.num_mooncake_groups;
+        let counter = self.weight_sender_counter.fetch_add(1, Ordering::Relaxed) % total_groups;
+        
+        let group_idx = counter / config.weight_sender_rpyc_endpoints.len();
+        let endpoint_idx = counter % config.weight_sender_rpyc_endpoints.len();
+        
+        (config.weight_sender_rpyc_endpoints[endpoint_idx], group_idx, config.num_mooncake_engines_per_group)
     }
     
     pub async fn wait_for_weight_senders(&self) {
@@ -80,150 +151,146 @@ impl AppState {
             drop(config);
             
             // Wait for notification of weight sender update
-            self.weight_sender_notify.notified().await;
+            self.weight_sender_register_notify.notified().await;
         }
     }
     
-    pub async fn get_all_instances(&self) -> Vec<Instance> {
+    pub fn get_all_instances(&self) -> Vec<Instance> {
         self.instances.iter()
-            .map(|entry| entry.value().clone())
+            .map(|entry| entry.value().instance) // Copy instead of clone
             .collect()
     }
     
     pub async fn add_instance_after_health_check(&self, instance: Instance) {
-        // Check for duplicates
-        if self.instances.contains_key(&instance.endpoint) {
-            log::info!("Instance {} already exists, skipping duplicate", instance.endpoint);
+        if self.instances.contains_key(&instance.addr) {
+            log::info!("Instance {} already exists, skipping duplicate", instance.endpoint());
             return;
         }
         
-        // Assign a weight sender to this instance
-        let weight_sender = self.get_next_weight_sender().await;
-        self.instance_weight_sender_map.insert(instance.endpoint.clone(), weight_sender.clone());
+        let weight_sender = instance.weight_sender_endpoint.unwrap();
+        let addr = instance.addr;
+        
+        let mut instance_with_weight_sender = instance;
+        instance_with_weight_sender.set_weight_sender(weight_sender);
         
         log::info!("Instance {} is now ready and added to instances list (id: {}) with weight sender {}", 
-                   instance.endpoint, instance.id, weight_sender);
-        self.instances.insert(instance.endpoint.clone(), instance.clone());
+                   instance_with_weight_sender.endpoint(), instance_with_weight_sender.id, weight_sender);
         
-        // Remove from pending list
-        self.pending_instances.remove(&instance.endpoint);
+        let instance_state = InstanceState {
+            instance: instance_with_weight_sender,
+            pending_requests: AtomicUsize::new(0),
+            updating_weight: AtomicBool::new(false),
+            current_weight_version: AtomicU64::new(0),
+        };
+        self.instances.insert(addr, instance_state);
         
-        // Notify waiters that a new instance has been registered
-        self.instance_registration_notify.notify_waiters();
+        self.pending_instances.remove(&addr);
     }
     
-    pub fn remove_from_pending(&self, endpoint: &str) {
+    pub fn remove_from_pending(&self, endpoint: &SocketAddr) {
         self.pending_instances.remove(endpoint);
     }
     
-    pub fn is_pending(&self, endpoint: &str) -> bool {
+    pub fn is_pending(&self, endpoint: &SocketAddr) -> bool {
         self.pending_instances.contains(endpoint)
     }
     
-    pub fn add_to_pending(&self, endpoint: String) {
-        self.pending_instances.insert(endpoint);
+    pub fn add_to_pending(&self, endpoint: &SocketAddr) {
+        self.pending_instances.insert(*endpoint);
     }
 
-    pub fn shutdown_instances(&self, endpoints: Vec<String>) {
+    pub async fn shutdown_instances(&self, endpoints: &[SocketAddr], check_weight_update: bool) -> Vec<SocketAddr> {
+        let mut instances_to_shutdown = Vec::new();
+        let mut shutdown_endpoints = Vec::new();
+        
+        // Batch collect instances to shutdown and remove from instances map
         for endpoint in endpoints {
-            self.pending_shutdown.insert(endpoint.clone());
-            log::info!("Instance {} marked for shutdown in next prepare round", endpoint);
-        }
-    }
-
-    pub async fn prepare_instances_for_weight_update_round(&self, weight_sender_endpoint: String) -> Result<Vec<InstanceInfo>, String> {
-        use tokio::time::{timeout, Duration};
-        
-        // Check if instances are already frozen for this round
-        if !self.instances_frozen_for_round.load(Ordering::Acquire) {
-            // First caller - need to freeze instances for the round
-            log::info!("First prepare_weight_update call - freezing instances for round");
-            
-            // Wait for at least one instance to be registered using async notify
-            let wait_result = timeout(Duration::from_secs(120), async {
-                loop {
-                    let instances = self.get_all_instances().await;
-                    if !instances.is_empty() {
-                        return instances;
-                    }
-                    log::info!("Waiting for rollout instances to register...");
-                    
-                    // Wait for notification of new instance registration
-                    self.instance_registration_notify.notified().await;
-                }
-            }).await;
-            
-            let mut all_instances = match wait_result {
-                Ok(instances) => instances,
-                Err(_) => {
-                    log::warn!("Timeout waiting for rollout instances to register");
-                    return Err("timeout waiting for rollout instances to register".to_string());
-                }
-            };
-            
-            // Remove instances that are pending shutdown
-            let shutdown_endpoints: Vec<String> = self.pending_shutdown.iter()
-                .map(|entry| entry.key().clone())
-                .collect();
-            
-            for endpoint in &shutdown_endpoints {
-                all_instances.retain(|instance| instance.endpoint != *endpoint);
-                // Also remove from the main instances map
-                self.instances.remove(endpoint);
-                // Remove from weight sender map
-                self.instance_weight_sender_map.remove(endpoint);
-                log::info!("Removed instance {} from active instances due to shutdown", endpoint);
+            match self.instances.try_entry(*endpoint) {
+                Some(dashmap::mapref::entry::Entry::Occupied(entry)) => {
+                                if check_weight_update {
+                                    let is_updating = entry.get().updating_weight.load(Ordering::Acquire);
+                                    if is_updating {
+                                        log::warn!("Instance {} is updating weights, skipping shutdown", endpoint);
+                                        continue;
+                                    }
+                                }
+                                let instance_state = entry.remove();
+                                instances_to_shutdown.push(instance_state.instance);
+                                shutdown_endpoints.push(*endpoint);
+                                log::info!("Instance {} removed from instances map", endpoint);
+                            }
+                Some(dashmap::mapref::entry::Entry::Vacant(_)) => {
+                                // Instance not found, skip
+                            }
+                None => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
             }
-            
-            // Clear the pending shutdown list
-            self.pending_shutdown.clear();
-            
-            // Set the fixed instances for weight update round
-            {
-                let mut active_instances = self.active_instances.write().await;
-                *active_instances = all_instances;
-            }
-            
-            // Mark instances as frozen for this round
-            self.instances_frozen_for_round.store(true, Ordering::Release);
-            
-            log::info!("Instances frozen for weight update round");
-        } else {
-            log::info!("Using already frozen instances for weight update round");
         }
         
-        // Get the frozen instances
-        let frozen_instances = self.active_instances.read().await.clone();
+        // Batch remove from active_instances with single lock acquisition
+        if !instances_to_shutdown.is_empty() {
+            let endpoints_set: std::collections::HashSet<_> = endpoints.iter().collect();
+            let mut active_instances = self.active_instances.write().await;
+            active_instances.retain(|inst| !endpoints_set.contains(&inst.addr));
+            drop(active_instances); // Release lock early
+            
+            log::info!("Removed {} instances from active pool", instances_to_shutdown.len());
+        }
         
-        // Filter instances by weight sender
-        let instance_infos = frozen_instances.into_iter()
-            .filter_map(|instance| {
-                if let Some(ws) = self.instance_weight_sender_map.get(&instance.endpoint) {
-                    if ws.value() == &weight_sender_endpoint {
-                        Some(InstanceInfo {
-                            id: instance.id,
-                            endpoint: instance.endpoint.clone(),
-                            weight_sender_endpoint: ws.value().clone(),
-                            mooncake_handshake_endpoint: instance.mooncake_handshake_endpoint.clone(),
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    log::error!("Instance {} does not have a weight sender assigned", instance.endpoint);
-                    None
-                }
-            })
-            .collect();
+        // Send shutdown commands asynchronously for all instances
+        for instance in instances_to_shutdown {
+            tokio::spawn(async move {
+                let url = format!("{}/shutdown?graceful=false", instance.endpoint());
+                let _ = reqwest::Client::new().post(&url).send().await;
+            });
+        }
         
-        Ok(instance_infos)
+        shutdown_endpoints
     }
     
-    pub fn mark_weight_update_round_complete(&self) {
-        // Mark the current round as complete and allow next round to freeze new instances
-        self.instances_frozen_for_round.store(false, Ordering::Release);
-        log::info!("Weight update round marked as complete");
+    pub fn increment_pending_request(&self, endpoint: &SocketAddr) {
+        if let Some(instance_state) = self.instances.get(endpoint) {
+            instance_state.pending_requests.fetch_add(1, Ordering::Relaxed);
+        } else if let Some(local_instance_state) = self.local_instances.get(endpoint) {
+            local_instance_state.pending_requests.fetch_add(1, Ordering::Relaxed);
+        } else {
+            panic!("Instance {} not found", endpoint);
+        }
     }
-
+    
+    pub async fn decrement_pending_request(&self, endpoint: &SocketAddr) {
+        // Both local and remote instance should notify on new availability
+        // TODO(liuxs): simplify the logic here
+        let config = self.config.read().await;
+        let max_pending = config.max_pending_requests_per_instance;
+        drop(config);
+        if let Some(instance_state) = self.instances.get(endpoint) {
+            let prev = instance_state.pending_requests.fetch_sub(1, Ordering::Relaxed);
+            
+            if prev == max_pending {
+                self.instances_available_notify.notify_waiters();
+                log::debug!("Instance {} now has capacity (pending: {}), notifying waiters", endpoint, prev - 1);
+            }
+        } else if let Some(local_instance_state) = self.local_instances.get(endpoint) {
+            let prev = local_instance_state.pending_requests.fetch_sub(1, Ordering::Relaxed);
+            
+            if prev == max_pending {
+                self.instances_available_notify.notify_waiters();
+                log::debug!("Instance {} now has capacity (pending: {}), notifying waiters", endpoint, prev - 1);
+            }
+        } 
+    }
+    
+    
+    pub async fn register_local_instances(&self, local_instances: Vec<Instance>) {
+        for local_instance in local_instances.iter() {
+            let local_instance_state = LocalInstanceState {
+                instance: *local_instance,
+                pending_requests: AtomicUsize::new(0),
+            };
+            self.local_instances.insert(local_instance_state.instance.addr, local_instance_state);
+        }
+        
+        log::info!("Registered {} new local instances, total: {}", local_instances.len(), self.local_instances.len());
+    }
 
 }

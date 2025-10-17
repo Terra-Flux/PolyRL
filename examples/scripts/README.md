@@ -15,15 +15,15 @@ It will automatically compile and launch the rollout manager and the weight tran
 
 2. Launch a rollout instance.
 
-Update the address in `launch_sglang_1.sh` and `launch_sglang_2.sh`
+Update the address in `launch_sglang.sh`
 ```bash
-ROLLOUT_MANAGER_ADDR="<ROLLOUT_MANAGER_IP>:<PORT>"
-HOST_ADDR="<YOUR_HOST_IP>"
+ROLLOUT_MANAGER_ADDR="<ROLLOUT_MANAGER_IP>:<PORT>" # Address of the head node of trainer
+HOST_ADDR="<YOUR_HOST_IP>" # Address of the remote rollout engine, usually a spot instance
 ```
 
+On each remote rollout engine, launch
 ```bash
-bash examples/scripts/launch_sglang_1.sh # on node 1
-bash examples/scripts/launch_sglang_1.sh # on node 2
+bash examples/scripts/launch_sglang.sh
 ```
 
 3. Run colocated RL baseline

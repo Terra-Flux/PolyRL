@@ -91,17 +91,62 @@ pub async fn update_weight_senders(
 ) -> impl IntoResponse {
     {
         let mut config = state.config.write().await;
-        config.weight_sender_rpyc_endpoints = payload.weight_sender_rpyc_endpoints.clone();
-        config.num_mooncake_groups = payload.num_mooncake_groups;
-        config.num_mooncake_engines_per_group = payload.num_mooncake_engines_per_group;
-        log::info!("Updated weight sender endpoints: {:?} with {} groups, {} engines per group", 
-                   config.weight_sender_rpyc_endpoints, config.num_mooncake_groups, config.num_mooncake_engines_per_group);
+        
+        // Update configuration values
+        config.num_mooncake_groups_per_sender = payload.num_mooncake_groups_per_sender.unwrap_or(config.num_mooncake_groups_per_sender);
+        config.num_mooncake_engines_per_group = payload.num_mooncake_engines_per_group.unwrap_or(config.num_mooncake_engines_per_group);
+        
+        // Convert IPs to endpoints using the base port and round-robin logic
+        let base_port = config.weight_sender_rpyc_base_port;
+
+        // weight_sender_ips is list of list: each inner list are ips from one node
+        // For each node, filter by allowed_sender_ips and pick the first allowed ip
+        let mut endpoints = Vec::new();
+        let mut total_original_ips = 0usize;
+        let mut total_filtered_ips = 0usize;
+        for node_ips in &payload.weight_sender_ips {
+            total_original_ips += node_ips.len();
+            let filtered = crate::utils::filter_ips_by_config(node_ips, &config.allowed_sender_ips);
+            total_filtered_ips += filtered.len();
+            // choose first allowed ip if any
+            if let Some(first_ip) = filtered.first() {
+                let ip = first_ip.clone();
+                match format!("{}:{}", ip, base_port).parse::<std::net::SocketAddr>() {
+                    Ok(addr) => endpoints.push(addr),
+                    Err(e) => {
+                        log::error!("Failed to parse IP address {}:{}: {}", ip, base_port, e);
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                            "error": format!("Invalid IP address: {}", ip)
+                        }))).into_response();
+                    }
+                }
+            } else {
+                log::warn!("No allowed IPs found for a node after filtering; node_ips={:?}", node_ips);
+            }
+        }
+        log::info!(
+            "Filtered {} IPs from {} original IPs across {} nodes using allowed_sender_ips: {}",
+            total_filtered_ips,
+            total_original_ips,
+            payload.weight_sender_ips.len(),
+            config.allowed_sender_ips
+        );
+        if endpoints.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "error": "no valid weight sender endpoints after filtering"
+            }))).into_response();
+        }
+        
+        config.weight_sender_rpyc_endpoints = endpoints;
+        
+        log::info!("Updated weight sender endpoints: {:?} with {} groups per ip, {} engines will be initialized per group", 
+                   config.weight_sender_rpyc_endpoints, config.num_mooncake_groups_per_sender, config.num_mooncake_engines_per_group);
     }
     
     // Notify any waiters that weight senders are now available
     state.weight_sender_register_notify.notify_waiters();
     
-    (StatusCode::OK, Json(serde_json::json!({"success": true})))
+    (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
 }
 
 async fn collect_streaming_response(
@@ -525,7 +570,7 @@ pub async fn update_weight_version(
     
     for instance in instances {
         if let Some(instance_state) = state.instances.get(&instance.addr) {
-            let pending = instance_state.pending_requests.load(Ordering::Relaxed);
+            let pending = instance_state.pending_batches.load(Ordering::Relaxed);
             if pending > 0 {
                 log::error!("Instance {} has {} pending requests during weight version update", 
                     instance.endpoint(), pending);
@@ -542,7 +587,7 @@ pub async fn update_weight_version(
         if !active_instances.iter().any(|i| i.addr == instance_state.instance.addr) {
             active_instances.push(instance_state.instance);
         }
-        log::debug!("Push local instance {} to active instances, pending {}", instance_state.instance.endpoint(), instance_state.pending_requests.load(Ordering::Relaxed));
+        log::debug!("Push local instance {} to active instances, pending {}", instance_state.instance.endpoint(), instance_state.pending_batches.load(Ordering::Relaxed));
     }
     drop(active_instances);
     

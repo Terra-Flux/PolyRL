@@ -83,84 +83,6 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
         pg_ip[pg.id] = node_ip[node_id]
     return sorted(pgs, key=lambda pg: pg_ip[pg.id])
 
-# polyrl-dev
-_PG_NODE_ALL_IPS_CACHE = {}
-
-# polyrl-dev
-@ray.remote(num_cpus=0)
-def get_node_ips():
-    import socket
-    import psutil
-    try:
-        all_interfaces = psutil.net_if_addrs()
-        ips = []
-        for interface, addrs in all_interfaces.items:
-            if interface != 'lo':
-                for addr in addrs:
-                    if addr.family == socket.AF_INET:
-                        ips.append(addr.address)
-        return ips
-    except:
-        try:
-            hostname = socket.gethostname()
-            return [socket.gethostbyname(hostname)]
-        except:
-            return []
-
-
-# polyrl-dev
-def filter_ips_by_config(all_ips: List[str], allowed_ips_config: str) -> List[str]:
-    if allowed_ips_config == "0.0.0.0/0":
-        return all_ips
-    
-    allowed_patterns = [s.strip() for s in allowed_ips_config.split(',')]
-    filtered_ips = []
-    
-    for ip in all_ips:
-        try:
-            ip_obj = ipaddress.ip_address(ip)
-            for pattern in allowed_patterns:
-                if '/' in pattern:
-                    if ip_obj in ipaddress.ip_network(pattern, strict=False):
-                        filtered_ips.append(ip)
-                        break
-                elif ip == pattern:
-                    filtered_ips.append(ip)
-                    break
-        except:
-            continue
-    
-    return filtered_ips
-
-
-# polyrl-dev
-def prepare_weight_sender_ips(pg: PlacementGroup, allowed_sender_ips: str, num_mooncake_groups: int) -> str:
-    specs = ray._private.state.state.placement_group_table(pg.id)
-    node_id = specs["bundles_to_node_id"][0]
-    cached = _PG_NODE_ALL_IPS_CACHE.get(node_id)
-    if cached is None:
-        worker_on_node = get_node_ips.options(
-            num_cpus=0,
-            scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
-        ).remote()
-        all_node_ips = ray.get(worker_on_node)
-        _PG_NODE_ALL_IPS_CACHE[node_id] = all_node_ips
-    else:
-        all_node_ips = cached
-    
-    filtered_ips = filter_ips_by_config(all_node_ips, allowed_sender_ips)
-    
-    if not filtered_ips:
-        raise RuntimeError(f"No IPs found matching allowed_sender_ips {allowed_sender_ips} from node IPs {all_node_ips}")
-    
-    if len(filtered_ips) < num_mooncake_groups:
-        weight_sender_ips = (filtered_ips * ((num_mooncake_groups // len(filtered_ips)) + 1))[:num_mooncake_groups]
-    else:
-        weight_sender_ips = filtered_ips[:num_mooncake_groups]
-    
-    return ','.join(weight_sender_ips)
-
-
 class RayResourcePool(ResourcePool):
     def __init__(
         self,
@@ -395,8 +317,6 @@ class RayWorkerGroup(WorkerGroup):
                 bin_pack=bin_pack,
                 detached=detached,
                 worker_env=self.customized_worker_env,
-                allowed_sender_ips=kwargs.get('allowed_sender_ips'),
-                num_mooncake_groups=kwargs.get('num_mooncake_groups'),
             )
 
         if ray_cls_with_init is not None:
@@ -426,7 +346,7 @@ class RayWorkerGroup(WorkerGroup):
         self._workers = workers
         self._world_size = len(worker_names)
 
-    def _init_with_resource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached, worker_env=None, allowed_sender_ips=None, num_mooncake_groups=None):
+    def _init_with_resource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached, worker_env=None):
         """Initialize the worker group by creating new workers from a resource pool.
 
         Args:
@@ -435,9 +355,6 @@ class RayWorkerGroup(WorkerGroup):
             bin_pack: Whether to use strict bin packing for resource allocation
             detached: Whether workers should be detached
         """
-        # polyrl-dev
-        if allowed_sender_ips is None or num_mooncake_groups is None:
-            raise ValueError("allowed_sender_ips must be provided for weight transfer configuration")
         use_gpu = resource_pool.use_gpu
 
         strategy = "PACK"
@@ -453,8 +370,6 @@ class RayWorkerGroup(WorkerGroup):
         local_world_size = resource_pool.store[0]
 
         for pg_idx, pg in enumerate(sort_placement_group_by_node_ip(pgs)):
-            # polyrl-dev
-            weight_sender_ip = prepare_weight_sender_ips(pg, allowed_sender_ips, num_mooncake_groups)
 
             assert local_world_size <= pg.bundle_count, f"when generating for {self.name_prefix}, for the "
             for local_rank in range(local_world_size):
@@ -468,8 +383,6 @@ class RayWorkerGroup(WorkerGroup):
                     "WG_BACKEND": "ray",
                     "RAY_LOCAL_WORLD_SIZE": str(local_world_size),
                     "RAY_LOCAL_RANK": str(local_rank),
-                    # polyrl-dev
-                    'WEIGHT_SENDER_IP': weight_sender_ip,
                 }
                 if rank != 0:
                     env_vars["MASTER_ADDR"] = self._master_addr

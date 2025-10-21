@@ -12,32 +12,8 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class MooncakeTransferEngineConfig:
-    local_hostname: str
-    protocol: str
-    device_name: str
-    handshake_port: int
-
-    @staticmethod
-    def from_file(file_path: str) -> "MooncakeTransferEngineConfig":
-        with open(file_path) as fin:
-            config = json.load(fin)
-        return MooncakeTransferEngineConfig(
-            local_hostname=config.get("local_hostname", None),
-            protocol=config.get("protocol", "tcp"),
-            device_name=config.get("device_name", ""),
-            handshake_port=config.get("handshake_port", None),
-        )
-
-    @staticmethod
-    def load_from_env() -> "MooncakeTransferEngineConfig":
-        config_file_path = os.getenv("MOONCAKE_CONFIG_PATH")
-        if config_file_path is None:
-            raise ValueError(
-                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
-            )
-        return MooncakeTransferEngineConfig.from_file(config_file_path)
+# Import config class from centralized config module
+from .config import MooncakeTransferEngineConfig
 
 
 class MooncakeTransferEngine:

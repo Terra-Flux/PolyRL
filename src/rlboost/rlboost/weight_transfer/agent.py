@@ -27,9 +27,9 @@ import zmq
 from rpyc.utils.classic import obtain
 
 from .transfer_engine import (MooncakeTransferEngine,
-                              MooncakeTransferEngineConfig,
                               TCPTransferEngine)
-from .utils import TransferAgentConfig, TransferStatus
+from .config import (MooncakeTransferEngineConfig, TransferAgentConfig, 
+                     TransferStatus, ReceiverInfo)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -179,17 +179,7 @@ class TransferRpycServer(rpyc.Service):
 
 
 
-@dataclass
-class ReceiverInfo:
-    session_ids: List[str]
-    buffer_ptr: int
-    buffer_length: int
-    zmq_endpoint: str
-    zmq_port: int
-    sglang_http_host: str
-    sglang_http_port: int
-    handshake_ports: List[int]
-    sender_group_index: int
+# ReceiverInfo is now imported from config.py
 
 
 class TransferAgent:
@@ -221,9 +211,8 @@ class TransferAgent:
         self.rollout_manager_endpoint = rollout_manager_endpoint
         self.tensors_meta = None
 
-        weight_sender_ips = os.environ.get('WEIGHT_SENDER_IP', '').split(',')
-        first_ip = weight_sender_ips[0] if weight_sender_ips else 'localhost'
-        self.endpoint = f"{first_ip}:{self.config.rpyc_bind_port}"
+        weight_sender_ip = config.mooncake_config[0].local_hostname
+        self.endpoint = f"{weight_sender_ip}:{self.config.rpyc_bind_port}"
         
         self.use_async_notify = os.environ.get('ASYNC_WEIGHT_NOTIFY', 'true').lower() == 'true'
         self.async_executor = None

@@ -8,14 +8,20 @@ use crate::balance::LoadBalanceState;
 
 pub struct InstanceState {
     pub instance: Instance,
-    pub pending_requests: AtomicUsize,
+    pub pending_batches: AtomicUsize, // pending batches are number of uncompleted response groups
+    pub running_samples: AtomicUsize, // running samples are abs number of running responses on the instance
+    pub queue_samples: AtomicUsize, // queue samples are abs number of queued responses on the instance
+    pub last_gen_throughput: AtomicU64, // last gen throughput in tokens per second
     pub updating_weight: AtomicBool,
     pub current_weight_version: AtomicU64,
 }
 
 pub struct LocalInstanceState {
     pub instance: Instance,
-    pub pending_requests: AtomicUsize,
+    pub pending_batches: AtomicUsize,
+    pub running_samples: AtomicUsize,
+    pub queue_samples: AtomicUsize,
+    pub last_gen_throughput: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -26,6 +32,7 @@ pub struct AppState {
     
     // Round-robin counter for load balancing
     pub rr_counter: Arc<AtomicUsize>,
+    pub assigned_batches: Arc<AtomicUsize>,
     
     // Configuration
     pub config: Arc<RwLock<Config>>,
@@ -56,6 +63,7 @@ impl AppState {
             instances: Arc::new(DashMap::new()),
             pending_instances: Arc::new(DashSet::new()),
             rr_counter: Arc::new(AtomicUsize::new(0)),
+            assigned_batches: Arc::new(AtomicUsize::new(0)),
             config: Arc::new(RwLock::new(config)),
             weight_sender_counter: Arc::new(AtomicUsize::new(0)),
             client: reqwest::Client::builder()
@@ -68,7 +76,7 @@ impl AppState {
             latest_weight_version: Arc::new(AtomicU64::new(0)),
             active_instances: Arc::new(RwLock::new(Vec::new())),
             local_instances: Arc::new(DashMap::new()),
-            load_balance_state: Arc::new(LoadBalanceState::new(50)),
+            load_balance_state: Arc::new(LoadBalanceState::new(150)),
         }
     }
 
@@ -76,9 +84,9 @@ impl AppState {
     pub async fn next_instance_with_type(&self) -> Option<(Instance, bool)> {
         // loop through active instances
         loop {
-            let max_pending = {
+            let max_assigned_batches_per_stats_check = {
                 let config = self.config.read().await;
-                config.max_pending_requests_per_instance
+                config.max_assigned_batches_per_stats_check
             };
             let active_instances = self.active_instances.read().await;
             
@@ -91,39 +99,50 @@ impl AppState {
                 continue;
             }
             
-            let start_idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % active_instances.len();
-            
-            if let Some(instance) = active_instances.iter()
-                .cycle()
-                .skip(start_idx)
-                .take(active_instances.len())
-                .find(|instance| {
-                    if let Some(instance_state) = self.instances.get(&instance.addr) {
-                        let pending = instance_state.pending_requests.load(Ordering::Relaxed);
-                        pending < max_pending
-                    } else if let Some(instance_state) = self.local_instances.get(&instance.addr) {
-                        let pending = instance_state.pending_requests.load(Ordering::Relaxed);
-                        pending < max_pending
+            // Atomic fetch-add with overflow check
+            let current = self.assigned_batches.fetch_add(1, Ordering::Relaxed);
+            if current < max_assigned_batches_per_stats_check {
+                // We're under the limit, proceed with work
+                let zero_queue_instances: Vec<&Instance> = active_instances.iter()
+                    .filter(|instance| {
+                        if let Some(instance_state) = self.instances.get(&instance.addr) {
+                            let queued = instance_state.queue_samples.load(Ordering::Relaxed);
+                            queued == 0
+                        } else if let Some(instance_state) = self.local_instances.get(&instance.addr) {
+                            let queued = instance_state.queue_samples.load(Ordering::Relaxed);
+                            queued == 0
+                        } else {
+                            log::warn!("{} is neither local or remote", instance.endpoint());
+                            false
+                        }
+                    })
+                    .collect();
+                
+                if !zero_queue_instances.is_empty() {
+                    // Round-robin among zero-queue instances
+                    let start_idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % zero_queue_instances.len();
+                    let instance = zero_queue_instances[start_idx];
+                    
+                    self.increment_pending_request(&instance.addr);
+                    if instance.mooncake_handshake_addr.is_some() {
+                        return Some((*instance, false));
                     } else {
-                        log::warn!("{} is neither local or remote", instance.endpoint());
-                        false
+                        return Some((*instance, true));
                     }
-                }) 
-            {
-                // if find a instance with pending < max_pending, return it
-                self.increment_pending_request(&instance.addr);
-                // NOTE: local instance doesn't have a mooncake_handshake_addr
-                if instance.mooncake_handshake_addr.is_some() {
-                    return Some((*instance, false));
                 } else {
-                    return Some((*instance, true));
+                    // No zero-queue instances available, need to wait
+                    drop(active_instances);
+                    log::debug!("No instances with zero queue, waiting for availability");
+                    self.instances_available_notify.notified().await;
+                    // Note: We've already claimed quota but no instances available
+                    // This is acceptable as the quota will be reset on next stats check
                 }
+            } else {
+                // We exceeded the limit, just wait (no rollback needed - counter resets every stats check)
+                drop(active_instances);
+                log::debug!("Assigned batches limit reached ({}), waiting for stats check reset", max_assigned_batches_per_stats_check);
+                self.instances_available_notify.notified().await;
             }
-            
-            drop(active_instances);
-            // otherwise sleep until any request is done
-            log::debug!("All available instances at capacity (max: {}), waiting for availability", max_pending);
-            self.instances_available_notify.notified().await;
         }
     }
     
@@ -133,7 +152,7 @@ impl AppState {
             panic!("No weight sender endpoints available");
         }
         
-        let total_groups = config.weight_sender_rpyc_endpoints.len() * config.num_mooncake_groups;
+        let total_groups = config.weight_sender_rpyc_endpoints.len() * config.num_mooncake_groups_per_sender;
         let counter = self.weight_sender_counter.fetch_add(1, Ordering::Relaxed) % total_groups;
         
         let group_idx = counter / config.weight_sender_rpyc_endpoints.len();
@@ -178,7 +197,10 @@ impl AppState {
         
         let instance_state = InstanceState {
             instance: instance_with_weight_sender,
-            pending_requests: AtomicUsize::new(0),
+            pending_batches: AtomicUsize::new(0),
+            running_samples: AtomicUsize::new(0),
+            queue_samples: AtomicUsize::new(0),
+            last_gen_throughput: AtomicU64::new(0),
             updating_weight: AtomicBool::new(false),
             current_weight_version: AtomicU64::new(0),
         };
@@ -249,34 +271,22 @@ impl AppState {
     
     pub fn increment_pending_request(&self, endpoint: &SocketAddr) {
         if let Some(instance_state) = self.instances.get(endpoint) {
-            instance_state.pending_requests.fetch_add(1, Ordering::Relaxed);
+            instance_state.pending_batches.fetch_add(1, Ordering::Relaxed);
         } else if let Some(local_instance_state) = self.local_instances.get(endpoint) {
-            local_instance_state.pending_requests.fetch_add(1, Ordering::Relaxed);
+            local_instance_state.pending_batches.fetch_add(1, Ordering::Relaxed);
         } else {
             panic!("Instance {} not found", endpoint);
         }
     }
     
     pub async fn decrement_pending_request(&self, endpoint: &SocketAddr) {
-        // Both local and remote instance should notify on new availability
-        // TODO(liuxs): simplify the logic here
-        let config = self.config.read().await;
-        let max_pending = config.max_pending_requests_per_instance;
-        drop(config);
+        // Decrement pending batch count
         if let Some(instance_state) = self.instances.get(endpoint) {
-            let prev = instance_state.pending_requests.fetch_sub(1, Ordering::Relaxed);
-            
-            if prev == max_pending {
-                self.instances_available_notify.notify_waiters();
-                log::debug!("Instance {} now has capacity (pending: {}), notifying waiters", endpoint, prev - 1);
-            }
+            let prev = instance_state.pending_batches.fetch_sub(1, Ordering::Relaxed);
+            log::debug!("Instance {} pending batches decremented to {}", endpoint, prev - 1);
         } else if let Some(local_instance_state) = self.local_instances.get(endpoint) {
-            let prev = local_instance_state.pending_requests.fetch_sub(1, Ordering::Relaxed);
-            
-            if prev == max_pending {
-                self.instances_available_notify.notify_waiters();
-                log::debug!("Instance {} now has capacity (pending: {}), notifying waiters", endpoint, prev - 1);
-            }
+            let prev = local_instance_state.pending_batches.fetch_sub(1, Ordering::Relaxed);
+            log::debug!("Instance {} pending batches decremented to {}", endpoint, prev - 1);
         } 
     }
     
@@ -285,7 +295,10 @@ impl AppState {
         for local_instance in local_instances.iter() {
             let local_instance_state = LocalInstanceState {
                 instance: *local_instance,
-                pending_requests: AtomicUsize::new(0),
+                pending_batches: AtomicUsize::new(0),
+                running_samples: AtomicUsize::new(0),
+                queue_samples: AtomicUsize::new(0),
+                last_gen_throughput: AtomicU64::new(0),
             };
             self.local_instances.insert(local_instance_state.instance.addr, local_instance_state);
         }

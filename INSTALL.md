@@ -5,6 +5,7 @@
 ```bash
 conda create -n polyrl python=3.12
 conda activate polyrl
+conda install -c conda-forge libcurl numactl 
 ```
 
 ## Install sglang
@@ -12,6 +13,7 @@ conda activate polyrl
 ```bash
 cd src/sglang
 pip install -e "python[all]"
+pip install flash-attn --no-build-isolation
 ```
 
 ## Install verl
@@ -21,13 +23,10 @@ cd ../verl
 pip install -e .
 ```
 
-## Install other dependencies
-
+## Install RLBoost
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-conda install -c conda-forge libcurl numactl 
-
-pip install flash_attn rpyc mooncake-transfer-engine --no-build-isolation
+cd ../rlboost
+pip install -e .
+pip install mooncake-transfer-engine # optional
 ```
-

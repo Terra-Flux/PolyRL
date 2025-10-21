@@ -26,102 +26,12 @@ from omegaconf import OmegaConf
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 # polyrl-dev
-import subprocess
-import requests
+from rlboost import spawn_rollout_manager, register_weight_senders
 
 from verl.trainer.ppo.stream_ray_trainer import StreamRayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 from verl.utils.import_utils import load_extern_type
-
-
-def spawn_rollout_manager(config):
-    """Spawn the rollout manager process and register weight senders."""
-    # Only spawn for sglang-disaggregated rollout
-    if config.actor_rollout_ref.rollout.name != "sglang-disaggregated":
-        return None
-        
-    if not config.actor_rollout_ref.rollout.get("rollout_manager", {}).get("endpoint"):
-        return None
-        
-    # Extract rollout manager config
-    rollout_mgr_config = config.actor_rollout_ref.rollout.rollout_manager
-    weight_sender_config = config.actor_rollout_ref.rollout.weight_sender
-    
-    # Get the directory of current file and calculate relative path to rollout-manager
-    current_file_dir = os.path.dirname(os.path.abspath(__file__))
-    rollout_manager_dir = os.path.join(current_file_dir, "../../../rollout-manager")
-    rollout_manager_dir = os.path.abspath(rollout_manager_dir)
-    
-    # Build command line arguments for rollout manager
-    cmd = ["cargo", "run", "--release", "--"]
-    
-    # Add mooncake transfer protocol if specified
-    if weight_sender_config.transfer_protocol is not None:
-        cmd.extend(["--mooncake-transfer-protocol", weight_sender_config.transfer_protocol])
-    
-    # Add mooncake transfer device name if specified  
-    if weight_sender_config.transfer_device_name is not None:
-        cmd.extend(["--mooncake-transfer-device-name", weight_sender_config.transfer_device_name])
-    
-    # Parse the endpoint to get bind address
-    port = rollout_mgr_config.port
-    cmd.extend(["--bind-addr", f"0.0.0.0:{port}"])
-    
-    # Start the rollout manager process with cargo run in the rollout-manager directory
-    print(f"[Training] Starting rollout manager with command: {' '.join(cmd)}")
-    process = subprocess.Popen(cmd, cwd=rollout_manager_dir)
-
-    return process
-
-
-def register_weight_senders(config, resource_pool_manager):
-    """Register weight sender endpoints based on resource pool specification."""
-    if not resource_pool_manager or not resource_pool_manager.resource_pool_dict:
-        raise RuntimeError("[Training] No resource pools available for weight sender registration")
-        
-    rollout_mgr_config = config.actor_rollout_ref.rollout.rollout_manager
-    weight_sender_config = config.actor_rollout_ref.rollout.weight_sender
-    
-    # Get weight sender endpoints from WEIGHT_SENDER_IP environment variables on each node
-    weight_sender_endpoints = []
-    num_mooncake_groups = weight_sender_config.get('num_mooncake_groups', 1)
-    rpyc_base_port = weight_sender_config.get('rpyc_bind_base_port', 18861)
-    
-    for pool_name, resource_pool in resource_pool_manager.resource_pool_dict.items():
-        assert pool_name == "global_pool"
-        for pg in resource_pool.pgs:
-            # Get WEIGHT_SENDER_IP from the placement group node
-            from verl.single_controller.ray.base import prepare_weight_sender_ips
-            allowed_sender_ips = weight_sender_config.get('allowed_sender_ips', '0.0.0.0/0')
-            weight_sender_ips_str = prepare_weight_sender_ips(pg, allowed_sender_ips, num_mooncake_groups)
-            first_ip = weight_sender_ips_str.split(',')[0]
-            endpoint = f"{first_ip}:{rpyc_base_port}"
-            if endpoint not in weight_sender_endpoints:
-                weight_sender_endpoints.append(endpoint)
-    
-    if not weight_sender_endpoints:
-        raise RuntimeError("[Training] No weight sender endpoints found")
-    
-    print(f"[Training] Registering weight sender endpoints: {weight_sender_endpoints}")
-    
-    # Update weight senders via REST API
-    try:
-        response = requests.put(
-            f"{rollout_mgr_config.endpoint}/update_weight_senders",
-            json={
-                "weight_sender_rpyc_endpoints": weight_sender_endpoints,
-                "num_mooncake_groups": num_mooncake_groups,
-                "num_mooncake_engines_per_group": weight_sender_config.get('num_mooncake_engines_per_group', 1)
-            },
-            timeout=10
-        )
-        if response.status_code == 200:
-            print("[Training] Successfully registered weight sender endpoints")
-        else:
-            raise RuntimeError(f"[Training] Failed to register weight senders: {response.text}")
-    except Exception as e:
-        raise RuntimeError(f"[Training] Error registering weight senders: {e}")
 
 
 def get_custom_reward_fn(config):
@@ -417,29 +327,6 @@ class TaskRunner:
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
-        # Set rollout manager endpoint dynamically based on head node IP
-        if config.actor_rollout_ref.rollout.rollout_manager.port:
-            try:
-                from ray.util.state import list_nodes
-                nodes = list_nodes()
-                head_node = next((node for node in nodes if node.is_head_node), None)
-                if head_node:
-                    head_ip = head_node.node_ip
-                else:
-                    # Fallback to the original method
-                    nodes = ray.nodes()
-                    head_node = next(node for node in nodes if node.get('Resources', {}).get('object_store_memory'))
-                    head_ip = head_node['NodeManagerAddress']
-            except ImportError:
-                # Fallback if Ray State API is not available
-                nodes = ray.nodes()
-                head_node = next(node for node in nodes if node.get('Resources', {}).get('object_store_memory'))
-                head_ip = head_node['NodeManagerAddress']
-            
-            rollout_mgr_port = config.actor_rollout_ref.rollout.rollout_manager.port
-            config.actor_rollout_ref.rollout.rollout_manager.endpoint = f"http://{head_ip}:{rollout_mgr_port}"
-            print(f"[Training] Set rollout manager endpoint to: {config.actor_rollout_ref.rollout.rollout_manager.endpoint}")
-
         # Start the training process.
         is_stream = config.trainer.get("stream_fit", False)
         trainer = StreamRayPPOTrainer(
@@ -458,6 +345,7 @@ class TaskRunner:
         )
 
         # polyrl-dev
+        # Get head node ip and spawn rollout manager
         current_node_id = ray.get_runtime_context().get_node_id()
         # Check if current node is head node using Ray State API
         try:
@@ -465,21 +353,29 @@ class TaskRunner:
             nodes = list_nodes()
             head_node = next((node for node in nodes if node.is_head_node), None)
             is_head_node = head_node and head_node.node_id == current_node_id
+            head_ip = head_node.node_ip
         except ImportError:
             # Fallback to the original method
             nodes = ray.nodes()
             head_node = next(node for node in nodes if node.get('Resources', {}).get('object_store_memory'))
             is_head_node = current_node_id == head_node['NodeID']
+            head_ip = head_node['NodeManagerAddress']
         
-        if is_head_node and config.actor_rollout_ref.rollout.name == "sglang-disaggregated":
+        assert config.actor_rollout_ref.rollout.name == "sglang-disaggregated", "main stream runs under rollout.name == sglang-disaggregated"
+        rollout_mgr_port = config.actor_rollout_ref.rollout.rollout_manager.port
+        config.actor_rollout_ref.rollout.rollout_manager.endpoint = f"http://{head_ip}:{rollout_mgr_port}"
+        print(f"[Training] Set rollout manager endpoint to: {config.actor_rollout_ref.rollout.rollout_manager.endpoint}")
+        if is_head_node:
             self.rollout_manager_process = spawn_rollout_manager(config)
 
         # Initialize the workers of the trainer.
         trainer.init_workers()
 
-        if is_head_node and config.actor_rollout_ref.rollout.name == "sglang-disaggregated":
+        # polyrl-dev
+        if is_head_node:
             register_weight_senders(config, resource_pool_manager)
 
+        # polyrl-dev
         if is_stream:
             min_stream_batch_size = config.actor_rollout_ref.rollout.get("min_stream_batch_size", 0)
             if min_stream_batch_size == 0:

@@ -276,28 +276,12 @@ profiler:
   tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
 
 # polyrl-dev
-weight_sender:
-  transfer_protocol: tcp
-
-  transfer_device_name: ""
-
-  mooncake_config_path: ""
-
-  rpyc_bind_base_port: 18861
-
-  mooncake_handshake_port: 19000
-
-  allowed_sender_ips: "0.0.0.0/0"
-
-  num_mooncake_engines_per_group: 1
-
-  num_mooncake_groups: 1
-
-# polyrl-dev
 rollout_manager:
   port: 5000
 
   endpoint: null  # This will be automatically set by main_ppo.py, do not set manually
+
+  config_path: null
 
 # polyrl-dev: minimum unit the rollout iter returns, dividable by both sample_n and update_actor_microbatch.
 min_stream_batch_size: 0

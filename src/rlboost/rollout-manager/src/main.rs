@@ -45,9 +45,13 @@ async fn main() -> Result<()> {
     log::info!("  mooncake_transfer_device_name: {}", config.mooncake_transfer_device_name);
     log::info!("  mooncake_transfer_protocol: {}", config.mooncake_transfer_protocol);
     log::info!("  weight_sender_rpyc_endpoints: {:?}", config.weight_sender_rpyc_endpoints);
+    log::info!("  num_mooncake_groups_per_sender: {}", config.num_mooncake_groups_per_sender);
+    log::info!("  num_mooncake_engines_per_group: {}", config.num_mooncake_engines_per_group);
+    log::info!("  max_assigned_batches_per_stats_check: {}", config.max_assigned_batches_per_stats_check);
     log::info!("  bind_addr: {}", args.bind_addr);
     
     let state = AppState::new(config);
+    let state_for_worker = state.clone();
 
     let app = Router::new()
         .route("/health", get(health_check))
@@ -64,6 +68,8 @@ async fn main() -> Result<()> {
         .route("/update_metrics", post(update_metrics))
         .route("/abort_local_requests", post(abort_local_requests))
         .with_state(state);
+
+    instance_manager::stats_check_worker(state_for_worker);
 
     let addr: SocketAddr = args.bind_addr.parse()?;
     let listener = tokio::net::TcpListener::bind(&addr).await?;

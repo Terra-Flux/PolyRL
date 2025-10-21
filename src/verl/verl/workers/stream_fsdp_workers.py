@@ -161,15 +161,13 @@ class StreamActorRolloutRefWorker(ActorRolloutRefWorker):
             if torch.distributed.get_world_size() == 1:
                 self.config.rollout.load_format = "dummy_hf"
             # polyrl-dev
-            weight_sender_config = None if rollout_name != 'sglang-disaggregated' else self.config.rollout.weight_sender
-            rollout_manager_config = None if rollout_name != 'sglang-disaggregated' else self.config.rollout.rollout_manager
+            # rollout_manager_config = None if rollout_name != 'sglang-disaggregated' else self.config.rollout.rollout_manager
+            # weight_sender_config_path = None if rollout_name != 'sglang-disaggregated' else rollout_manager_config.config_path
             rollout_sharding_manager = FSDPSGLangShardingManager(
                 module=self.actor_module_fsdp,
                 inference_engine=rollout._engine,
                 model_config=self.actor_model_config,
                 rollout_config=self.config.rollout,
-                weight_sender_config=weight_sender_config,
-                rollout_manager_config=rollout_manager_config,
                 full_params="hf" in self.config.rollout.load_format,
                 device_mesh=rollout_device_mesh,
                 offload_param=self._is_offload_param,

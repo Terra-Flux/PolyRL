@@ -861,14 +861,6 @@ class RayPPOTrainer:
                 OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
             )
         wg_kwargs["device_name"] = self.device_name
-
-        # polyrl-dev
-        # Add weight sender configuration for multiple engine groups
-        if hasattr(self.config, 'actor_rollout_ref') and hasattr(self.config.actor_rollout_ref, 'rollout'):
-            if hasattr(self.config.actor_rollout_ref.rollout, 'weight_sender'):
-                weight_sender_config = self.config.actor_rollout_ref.rollout.weight_sender
-                wg_kwargs["allowed_sender_ips"] = weight_sender_config.get('allowed_sender_ips', '0.0.0.0/0')
-                wg_kwargs["num_mooncake_groups"] = weight_sender_config.get('num_mooncake_groups', 1)
         
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             # polyrl-dev

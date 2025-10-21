@@ -53,9 +53,10 @@ pub struct UpdateWeightsFromAgentRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateWeightSendersRequest {
-    pub weight_sender_rpyc_endpoints: Vec<SocketAddr>,
-    pub num_mooncake_groups: usize,
-    pub num_mooncake_engines_per_group: usize,
+    // list of list: each inner list contains ips of a single node
+    pub weight_sender_ips: Vec<Vec<String>>,
+    pub num_mooncake_groups_per_sender: Option<usize>,
+    pub num_mooncake_engines_per_group: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,10 +106,12 @@ impl Instance {
 pub struct Config {
     pub mooncake_transfer_device_name: String,
     pub mooncake_transfer_protocol: String,
+    pub allowed_sender_ips: String,
     pub weight_sender_rpyc_endpoints: Vec<SocketAddr>,
-    pub num_mooncake_groups: usize,
+    pub weight_sender_rpyc_base_port: usize,
+    pub num_mooncake_groups_per_sender: usize,
     pub num_mooncake_engines_per_group: usize,
-    pub max_pending_requests_per_instance: usize,
+    pub max_assigned_batches_per_stats_check: usize,
     pub train_batch_size: Option<usize>,
 }
 

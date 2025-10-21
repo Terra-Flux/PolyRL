@@ -20,14 +20,9 @@ import os
 from dataclasses import dataclass
 from typing import Union
 import time
-# polyrl-dev
-import uuid
-import json
 
 import torch
 import torch.distributed as dist
-# polyrl-dev
-import torch.multiprocessing as mp
 from sglang.srt.entrypoints.engine import Engine
 from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from torch.distributed.device_mesh import DeviceMesh
@@ -46,64 +41,16 @@ from verl.utils.torch_functional import check_device_is_available
 from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
 
 # polyrl-dev
-from verl.workers.rollout.weight_transfer import (MooncakeTransferEngineConfig,
-                                                  TransferAgentConfig,
-                                                  start_transfer_agent)
+from rlboost import FSDPInterface
 from .base import BaseShardingManager
-
-# polyrl-dev
-import requests
-
 # from vllm.distributed import parallel_state as sglang_ps
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-
-def wait_for_rollout_manager_ready(endpoint: str, max_retries: int = 20, initial_delay: float = 1.0, max_delay: float = 30.0) -> bool:
-    """
-    Wait for rollout manager to become ready with exponential backoff.
-    
-    Args:
-        endpoint: The rollout manager endpoint URL
-        max_retries: Maximum number of retry attempts (default: 20)
-        initial_delay: Initial delay between retries in seconds (default: 1.0)
-        max_delay: Maximum delay between retries in seconds (default: 30.0)
-    
-    Returns:
-        True if rollout manager is ready, False if max retries exceeded
-    """
-    delay = initial_delay
-    
-    for attempt in range(max_retries):
-        try:
-            # Try to reach the health endpoint or a simple GET request
-            health_url = f"{endpoint.rstrip('/')}/health"
-            response = requests.get(health_url, timeout=5)
-            if response.status_code == 200:
-                logger.info(f"\x1b[31;20m[FSDPSGLangShardingManager] Rollout manager is ready at {endpoint}\x1b[31;20m")
-                return True
-        except Exception as e:
-            logger.info(f"[FSDPSGLangShardingManager] Attempt {attempt + 1}/{max_retries}: Rollout manager not ready at {endpoint}, error: {e}")
-        
-        if attempt < max_retries - 1:  # Don't sleep on the last attempt
-            time.sleep(delay)
-            delay = min(delay * 1.5, max_delay)  # Exponential backoff with cap
-    
-    logger.error(f"[FSDPSGLangShardingManager] Failed to connect to rollout manager at {endpoint} after {max_retries} attempts")
-    return False
-
 
 def _preprocess_tensor_for_update_weights(tensor: torch.Tensor):
     if isinstance(tensor, DTensor):
         return tensor.full_tensor()
     return tensor
-
-
-@dataclass
-class RolloutManagerConfig:
-    port: int  # Rollout manager port
-    endpoint: str  # Rollout manager HTTP endpoint
-
 
 class FSDPSGLangShardingManager(BaseShardingManager):
     @check_device_is_available()
@@ -113,10 +60,6 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         inference_engine: Engine,
         model_config,
         rollout_config,
-        # polyrl-dev
-        weight_sender_config = None,
-        # polyrl-dev
-        rollout_manager_config = None,
         full_params: bool = False,
         device_mesh: DeviceMesh = None,
         offload_param: bool = False,
@@ -129,16 +72,6 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         self.device_mesh = device_mesh
         self.offload_param = offload_param
         self.multi_stage_wake_up = multi_stage_wake_up
-
-        # polyrl-dev
-        if weight_sender_config is not None:
-            self.weight_sender_config = self._build_sender_config(weight_sender_config)
-        else:
-            self.weight_sender_config = None
-        self.weight_sender_agent = None
-        self.weight_sender_agent_queues = None
-        self.weight_sender_agent_buffer = None
-        self.rollout_manager_config = rollout_manager_config
 
         # Full params
         self.full_params = full_params
@@ -168,8 +101,15 @@ class FSDPSGLangShardingManager(BaseShardingManager):
             self.gen_random_states = None
 
         # polyrl-dev
-        if self.rollout_manager_config is not None:
-            self.wait_for_rollout_manager_ready()
+        # Initialize weight transfer interface, return when rollout manager is ready
+        if rollout_config.rollout_manager.endpoint is not None:
+            self.weight_transfer = FSDPInterface(
+                local_rank=int(os.environ.get('RAY_LOCAL_RANK', 0)),
+                global_rank=dist.get_rank() if dist.is_initialized() else 0,
+                params=self.module.state_dict(),
+                rollout_manager_endpoint=rollout_config.rollout_manager.endpoint,
+                weight_sender_config_path=rollout_config.rollout_manager.config_path,
+            )
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager enter", logger=logger)
     def __enter__(self):
@@ -193,10 +133,13 @@ class FSDPSGLangShardingManager(BaseShardingManager):
             params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
             # Copy, not share memory
             # polyrl-dev
-            if self.weight_sender_config is not None:
-                self.update_weights_with_agent(params)
-            else:
-                raise ValueError("weight sender config must be set to update with agent!")
+            # make sure all nodes are ready before weight copy
+            if dist.is_initialized():
+                dist.barrier()
+            self.weight_transfer.update_weights_with_agent(params)
+            # make sure all nodes are ready after weight copy
+            if dist.is_initialized():
+                dist.barrier()
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
 
             del params
@@ -333,215 +276,3 @@ class FSDPSGLangShardingManager(BaseShardingManager):
             return data
 
         return data.chunk(chunks=self.tp_size)[self.tp_rank]
-
-    # polyrl-dev
-    def update_weights_with_agent(self, params):
-        local_rank = int(os.environ.get('RAY_LOCAL_RANK', 0))
-        global_rank = dist.get_rank()
-        
-        # Every local rank 0 creates and manages its own weight sender agent
-        if self.weight_sender_agent is None:
-            meta_size, tensors_meta = self._get_meta_tensors_from_state_dict(params)
-
-            if local_rank == 0:
-                rollout_manager_endpoint = self.rollout_manager_config.endpoint if self.rollout_manager_config else None
-                self._start_transfer_agent(meta_size, tensors_meta, rollout_manager_endpoint)
-            else:
-                self.weight_sender_agent = False
-        
-        # Only global rank 0 calls update_weight_version
-        if global_rank == 0:
-            self._update_weight_version()
-        
-        # Barrier to ensure all nodes are ready before weight copy
-        if self.device_mesh is not None:
-            dist.barrier()
-
-        # All ranks copy weights to buffer, but only local rank 0s send, most time consuming step
-        tensors_meta = self._copy_weights_to_buffer(params)
-
-        if local_rank == 0:
-            self.weight_sender_agent_queues[0].put("update_weights")
-            status = self.weight_sender_agent_queues[1].get()
-            if status != "completed":
-                raise RuntimeError(f"Weight update failed: {status}")
-        
-        # Barrier for FSDP synchronization only
-        if self.device_mesh is not None:
-            dist.barrier()
-
-    # polyrl-dev
-    def _update_weight_version(self):
-        if self.rollout_manager_config is None:
-            logger.warning("[Weight Transfer] Rollout manager config not set, skipping weight version update")
-            return
-        
-        rollout_mgr_url = self.rollout_manager_config.endpoint
-        try:
-            response = requests.post(f"{rollout_mgr_url.rstrip('/')}/update_weight_version", timeout=60)
-            response.raise_for_status()
-            result = response.json()
-            if result.get("success", False):
-                new_version = result.get("new_weight_version", 0)
-                logger.info(f"[Weight Transfer] Successfully updated weight version to {new_version}")
-            else:
-                raise RuntimeError(f"Rollout manager weight version update failed: {response.text}")
-        except Exception as e:
-            logger.error(f"Error during weight version update call to rollout manager: {e}")
-            raise
-
-    def _build_sender_config(self, config):
-        # Extract configuration values from self.config
-        assert 'RAY_LOCAL_RANK' in os.environ, "RAY_LOCAL_RANK must be set"
-        assert 'WEIGHT_SENDER_IP' in os.environ, "WEIGHT_SENDER_IP must be set"
-        
-        weight_sender_ips = os.environ.get('WEIGHT_SENDER_IP').split(',')
-        num_mooncake_groups = config.get('num_mooncake_groups', 1)
-        num_mooncake_engines_per_group = config.get('num_mooncake_engines_per_group', 1)
-        
-        if len(weight_sender_ips) != num_mooncake_groups:
-            raise ValueError(f"Number of weight sender IPs ({len(weight_sender_ips)}) does not match num_mooncake_groups ({num_mooncake_groups})")
-        rpyc_bind_port = config.get('rpyc_bind_base_port', 18861)
-        transfer_protocol = config.get('transfer_protocol', 'tcp')
-        transfer_device_name = config.get('transfer_device_name', '')
-        base_handshake_port = config.get('mooncake_handshake_port', 19000)
-        
-        # Create Mooncake configurations for each group
-        mooncake_configs = []
-        for group_idx, ip in enumerate(weight_sender_ips):
-            group_handshake_port = base_handshake_port + group_idx * 1000
-            mooncake_config = MooncakeTransferEngineConfig(
-                local_hostname=ip,
-                protocol=transfer_protocol,
-                device_name=transfer_device_name,
-                handshake_port=group_handshake_port,
-            )
-            mooncake_configs.append(mooncake_config)
-        global_rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size() 
-        # Create and return the sender configuration
-        sender_config = TransferAgentConfig(
-            trainer_global_rank=global_rank,
-            trainer_world_size=world_size,
-            mooncake_config=mooncake_configs,
-            num_mooncake_engines_per_group=num_mooncake_engines_per_group,
-            rpyc_bind_port=rpyc_bind_port,
-        )
-        
-        return sender_config
-
-    # polyrl-dev
-    def _get_meta_tensors_from_state_dict(self, state_dict):
-        meta_size = []
-        tensors_meta = []
-        for name, param in state_dict.items():
-            if isinstance(param, DTensor):
-                param = param.full_tensor()
-            assert torch.is_tensor(param)
-            # meta = torch.empty_like(param, device='meta')
-            meta_size.append((name, param.numel() * param.element_size()))
-
-            dtype = str(param.dtype).split('.')[-1]
-            shape = list(param.shape)
-            tensors_meta.append((name, (shape, dtype)))
-        return meta_size, tensors_meta
-
-    # polyrl-dev
-    # NOTE(yongji): Lazy initialization of weight transfer on the first weight transfer
-    def _start_transfer_agent(self, meta_tensors, tensors_meta, rollout_manager_endpoint):
-        # Create TCP topology JSON if using TCP protocol
-        if hasattr(self.weight_sender_config.mooncake_config, 'protocol') and \
-            self.weight_sender_config.mooncake_config.protocol == 'tcp':
-            create_tcp_topology_json()
-        
-        os.environ["MC_FORCE_TCP"] = "1"
-        os.environ["MC_LEGACY_RPC_PORT_BINDING"] = "1"
-        mp.set_start_method('spawn', force=True)
-        input_queue = mp.Queue()
-        output_queue = mp.Queue()
-        input_queue.put(meta_tensors)
-        input_queue.put(tensors_meta)
-        self.weight_sender_agent = start_transfer_agent(
-            self.weight_sender_config, 
-            input_queue, 
-            output_queue,
-            rollout_manager_endpoint,
-        )
-        self.weight_sender_agent_queues = (input_queue, output_queue)
-        
-        result = output_queue.get(timeout=60)
-        if isinstance(result, tuple):
-            shm_path, buffer_length = result
-            assert isinstance(shm_path, str), "Should receive shared memory path"
-            assert isinstance(buffer_length, int), "Should receive buffer length"
-            
-            from verl.workers.rollout.weight_transfer.agent import create_tensor_from_shared_memory
-            self.weight_sender_agent_buffer = create_tensor_from_shared_memory(shm_path, buffer_length)
-        else:
-            buffer = result
-            assert torch.is_tensor(buffer)
-            assert buffer.is_cpu
-            self.weight_sender_agent_buffer = buffer
-
-    # polyrl-dev
-    def _copy_weights_to_buffer(self, state_dict):
-        offset = 0
-        tensors_meta = []
-        for name, param in state_dict.items():
-            if isinstance(param, DTensor):
-                param = param.full_tensor()
-            numel = param.numel()
-            size_in_bytes = numel * param.element_size()
-            
-            if self.weight_sender_agent:
-                param_data_cpu = param.data.contiguous() # .cpu()
-                param_u8 = param_data_cpu.view(-1).view(torch.uint8)
-                buffer_slice = self.weight_sender_agent_buffer[offset : offset + size_in_bytes]
-                buffer_slice.copy_(param_u8, non_blocking=True)
-                offset += size_in_bytes
-
-            dtype = str(param.dtype).split('.')[-1]
-            shape = list(param.shape)
-            tensors_meta.append((name, (shape, dtype)))
-        torch.cuda.synchronize()
-
-        return tensors_meta
-
-    def wait_for_rollout_manager_ready(self):
-        if self.rollout_manager_config is None:
-            return
-        rollout_mgr_endpoint = self.rollout_manager_config.endpoint
-        if not wait_for_rollout_manager_ready(rollout_mgr_endpoint):
-            raise RuntimeError("Rollout manager is not ready")
-
-
-def create_tcp_topology_json():
-    # Generate base filename
-    base_filename = "mc_topo.json"
-    target_path = f"/tmp/{base_filename}"
-    
-    # Try to remove existing file, if it exists and can't be removed, add random suffix
-    if os.path.exists(target_path):
-        try:
-            os.remove(target_path)
-            logger.info(f"Removed existing file: {target_path}")
-        except OSError:
-            # Can't remove, add uuid 4-digit suffix
-            uuid_suffix = str(uuid.uuid4()).replace('-', '')[:4]
-            base_filename = f"mc_topo_{uuid_suffix}.json"
-            target_path = f"/tmp/{base_filename}"
-            logger.info(f"Could not remove existing file, using new name: {target_path}")
-    
-    # Create empty JSON file
-    try:
-        with open(target_path, 'w') as f:
-            json.dump({}, f)
-        logger.info(f"Created empty topology JSON file: {target_path}")
-        
-        # Set environment variable
-        os.environ["MC_CUSTOM_TOPO_JSON"] = target_path
-        logger.info(f"Set MC_CUSTOM_TOPO_JSON environment variable to: {target_path}")
-        
-    except Exception as e:
-        logger.error(f"Failed to create topology JSON file: {e}")
-        raise

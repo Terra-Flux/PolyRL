@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rlboost"
+version = "0.1.0"
+description = "RLBoost: Harvesting Preemptible Resources for Cost-Efficient Reinforcement Learning on LLMs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Terra-Flux Developers" }
+]
+keywords = ["reinforcement-learning", "distributed", "weights", "transfer", "sglang"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy>=1.25",
+  "torch>=2.8",
+  "requests>=2.28",
+  "rpyc>=6.0",
+  "pyzmq>=27.1",
+  "uvloop; platform_system == 'Linux'",
+  "aiohttp>=3.9",
+  "ray>=2.49",
+  "psutil>=7.0",
+  "toml>=0.10",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rlboost*"]
+exclude = ["tests*", "examples*"]
+
+

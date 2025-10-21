@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use serde_json;
+use std::net::IpAddr;
+use ipnetwork::IpNetwork;
 
 pub fn merge_arrays(first: &serde_json::Value, second: &mut serde_json::Value, key_path: &[&str]) {
     let mut first_val = first;
@@ -298,4 +300,40 @@ pub fn adjust_sampling_params_for_used_tokens(
 //     }
 // }
 
-
+/// Filter IP addresses based on allowed IP configuration
+/// Replicates the Python implementation in utils.py
+pub fn filter_ips_by_config(all_ips: &[String], allowed_ips_config: &str) -> Vec<String> {
+    if allowed_ips_config == "0.0.0.0/0" {
+        return all_ips.to_vec();
+    }
+    
+    let allowed_patterns: Vec<&str> = allowed_ips_config
+        .split(',')
+        .map(|s| s.trim())
+        .collect();
+    
+    let mut filtered_ips = Vec::new();
+    
+    for ip in all_ips {
+        if let Ok(ip_addr) = ip.parse::<IpAddr>() {
+            for pattern in &allowed_patterns {
+                if pattern.contains('/') {
+                    // Handle CIDR notation
+                    if let Ok(network) = pattern.parse::<IpNetwork>() {
+                        if network.contains(ip_addr) {
+                            filtered_ips.push(ip.clone());
+                            break;
+                        }
+                    }
+                } else if ip == *pattern {
+                    // Handle exact IP match
+                    filtered_ips.push(ip.clone());
+                    break;
+                }
+            }
+        }
+        // Skip invalid IPs (equivalent to Python's except: continue)
+    }
+    
+    filtered_ips
+}

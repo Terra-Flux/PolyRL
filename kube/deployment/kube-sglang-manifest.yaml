@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-app
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: sglang
+  template:
+    metadata:
+      labels:
+        app: sglang
+    spec:
+      # 1. TOLERATION: Allows this pod to be scheduled on a tainted GPU node
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+        
+      # 2. NODE SELECTOR: Ensures this pod only runs on nodes with a T4 GPU
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-h100-80gb
+        cloud.google.com/gke-spot: "true"
+        
+      # MODIFICATION: Add a memory-backed volume for shared memory (/dev/shm)
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 512Gi # A generous size for multi-GPU communication
+
+      # Add these two lines to the Pod specification to use host network
+      hostNetwork: true
+      hostUsers: true
+
+      containers:
+      - name: rl-rollout
+        image: "<your image name>-rollout:v1"
+        command: ["bash", "launch_sglang.sh"]
+
+        # MODIFICATION: Add environment variable to set the host
+        env:
+        - name: SGLANG_MODEL_NAME
+          value: "Qwen/Qwen3-8B"
+
+        # MODIFICATION: Mount the shared memory volume into the container
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+          
+        # 3. RESOURCE LIMIT: Requests 2 GPUs for this container
+        resources:
+          limits:
+            nvidia.com/gpu: "2"

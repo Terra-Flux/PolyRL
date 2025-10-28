@@ -1,0 +1,35 @@
+[general]
+project = "example-project"
+region = "us-central1"
+zone = "us-central1-a"
+cluster_name = "example-cluster"
+vpc_net = "projects/example-project/global/networks/example-mgmt-net"
+vpc_subnet = "projects/example-project/regions/us-central1/subnetworks/example-mgmt-sub"
+namespace = "default"
+logs_dir = "logs/example"
+bind_addr = "0.0.0.0:5000"
+
+[default_pool]
+machine_type = "e2-medium"
+min_nodes = 1
+max_nodes = 4
+
+[[worker_pools]]
+machine_type = "n1-standard-1"
+provision = "spot"
+accelerator = "type=nvidia-tesla-t4,count=1,gpu-driver-version=latest"
+min_nodes = 0
+max_nodes = 8
+
+[[worker_pools]]
+machine_type = "a3-highgpu-2g"
+provision = "spot"
+accelerator = "type=nvidia-h100-80gb,count=2,gpu-driver-version=latest"
+min_nodes = 0
+max_nodes = 8
+
+[deployments]
+files = ["deployment/kube-test-manifest.yaml"]
+
+[scaler]
+scale_up_step = 1

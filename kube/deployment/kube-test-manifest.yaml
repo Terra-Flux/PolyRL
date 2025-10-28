@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-test-app
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: gpu-test
+  template:
+    metadata:
+      labels:
+        app: gpu-test
+    spec:
+      # 1. TOLERATION: Allows this pod to be scheduled on a tainted GPU node
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+        
+      # 2. NODE SELECTOR: Ensures this pod only runs on nodes with a T4 GPU
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-tesla-t4
+        cloud.google.com/gke-spot: "true"
+        
+      containers:
+      - name: cuda-pytorch-test
+        image: "<your image name>-test:v1"
+        command: ["llm/bin/python3", "test_script.py"]
+
+        # 3. RESOURCE LIMIT: Requests 1 GPU for this container
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+

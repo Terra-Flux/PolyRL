@@ -7,11 +7,11 @@ mooncake_transfer_device_name = ""
 # Mooncake transfer protocol (e.g., rdma, tcp)
 mooncake_transfer_protocol = "tcp"
 
+allowed_sender_ips = "192.168.0.0/16"
+weight_sender_rpyc_base_port = 18861
 # Weight sender RPyC endpoints
 # These will be automatically populated by the training script
 # but can be manually configured here
-allowed_sender_ips = "192.168.0.0/16"
-weight_sender_rpyc_base_port = 18861
 weight_sender_rpyc_endpoints = []
 
 # Number of mooncake groups per sender

@@ -1,0 +1,14 @@
+# rust
+rust/target/
+rust/Cargo.lock
+
+# python
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+**/__pycache__/

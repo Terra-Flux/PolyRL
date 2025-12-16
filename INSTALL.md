@@ -1,32 +1,59 @@
 # Install
 
+## Prerequisite
+
+Make sure GCC and NVCC is installed on your system. 
+You can install GCC via `apt install build-essential`.
+For NVCC, please refer to [CUDA-12.9 Installation Guide](https://developer.nvidia.com/cuda-12-9-0-download-archive).
+
+## Clone repository
+
+```bash
+git clone https://github.com/Terra-Flux/PolyRL.git --recursive
+cd polyrl
+```
+
 ## Create conda environment
 
+PolyRL requires `uv` to install local packages.
 ```bash
-conda create -n polyrl python=3.12
+conda create -n polyrl python=3.12 uv
 conda activate polyrl
-conda install -c conda-forge libcurl numactl 
 ```
 
-## Install sglang
+> ***Note***: If `libnuma` is not installed in your environment, install via `conda install -c conda-forge numactl`. 
 
-```bash
-cd src/sglang
-pip install -e "python[all]"
-pip install flash-attn --no-build-isolation
-```
+## Install Rust
 
-## Install verl
-
-```bash
-cd ../verl
-pip install -e .
-```
-
-## Install RLBoost
+PolyRL rollout manager is implemented in Rust for better performance. 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-cd ../rlboost
-pip install -e .
-pip install mooncake-transfer-engine # optional
+```
+
+## Install dependencies
+
+- SGLang:
+
+```bash
+uv pip install sglang==0.5.5
+```
+
+- Flash Attention (Recommended mm_backend by SGLang):
+
+```bash
+uv pip install flash-attn --no-build-isolation
+```
+
+- VeRL
+
+```bash
+cd 3rdparty/verl
+uv pip install -e .
+cd ../..
+```
+
+## Install PolyRL
+
+```bash
+uv pip install -e .
 ```

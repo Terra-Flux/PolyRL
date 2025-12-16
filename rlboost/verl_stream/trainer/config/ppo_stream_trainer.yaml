@@ -1,0 +1,23 @@
+hydra:
+  searchpath:
+    - file://3rdparty/verl/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    _target_: rlboost.verl_stream.workers.config.RolloutConfig
+    name: sglang-disaggregated
+    
+    # polyrl-dev
+    rollout_manager:
+      port: 5000
+
+      endpoint: null  # This will be automatically set by main_ppo.py, do not set manually
+
+      config_path: null
+
+    # polyrl-dev: minimum unit the rollout iter returns, dividable by both sample_n and update_actor_microbatch.
+    min_stream_batch_size: 0

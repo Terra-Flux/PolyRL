@@ -1,0 +1,2 @@
+include rlboost_autopatch.pth
+include setup.py

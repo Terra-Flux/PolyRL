@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "rollout-manager",
+]
+resolver = "2"

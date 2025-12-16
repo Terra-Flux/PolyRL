@@ -1,28 +1,29 @@
 #!/bin/bash
 
+# script to run verl as baseline
 ulimit -n 65536  # Increase max open files
 
 # Set dataset directory - use environment variable RL_DATA_DIR if set, otherwise use default
 RL_DATA_DIR=${RL_DATA_DIR:-"~/data/openr1"}
-ROLLOUT_NAME=${ROLLOUT_NAME:-"sglang-disaggregated"}
+ROLLOUT_NAME=${ROLLOUT_NAME:-"sglang"}
 
-EXP_NAME="qwen3_1.7b_polyrl_grpo"
+EXP_NAME="qwen3_1.7b_sync_grpo"
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 
 echo "Starting GRPO training..."
 # Run PPO training
 RAY_DEDUP_LOGS=0 \
-PYTHONUNBUFFERED=1 python3 -m rlboost.verl_stream.trainer.main_stream \
+PYTHONUNBUFFERED=1 python3 -m rlboost.verl_stream.trainer.main_ppo \
  algorithm.adv_estimator=grpo \
  data.train_files=${RL_DATA_DIR}/train.parquet \
  data.val_files=${RL_DATA_DIR}/test.parquet \
- data.train_batch_size=128 \
+ data.train_batch_size=256 \
  data.val_batch_size=32 \
  data.max_prompt_length=512 \
  data.max_response_length=14336 \
  data.filter_overlong_prompts=True \
  data.truncation='error' \
- actor_rollout_ref.nccl_timeout=2000 \
+ actor_rollout_ref.nccl_timeout=6000 \
  actor_rollout_ref.rollout.name=${ROLLOUT_NAME} \
  actor_rollout_ref.model.path=Qwen/Qwen3-1.7B \
  actor_rollout_ref.actor.optim.lr=1e-6 \
@@ -35,7 +36,6 @@ PYTHONUNBUFFERED=1 python3 -m rlboost.verl_stream.trainer.main_stream \
  actor_rollout_ref.actor.use_dynamic_bsz=True \
  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
- actor_rollout_ref.rollout.min_stream_batch_size=16 \
  actor_rollout_ref.rollout.calculate_log_probs=False \
  actor_rollout_ref.model.enable_gradient_checkpointing=True \
  actor_rollout_ref.actor.fsdp_config.param_offload=False \
@@ -43,7 +43,6 @@ PYTHONUNBUFFERED=1 python3 -m rlboost.verl_stream.trainer.main_stream \
  actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
  actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
  actor_rollout_ref.rollout.n=8 \
- actor_rollout_ref.rollout.free_cache_engine=True \
  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
  algorithm.use_kl_in_reward=False \
  trainer.logger=['console','tensorboard'] \

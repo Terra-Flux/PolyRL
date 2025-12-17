@@ -6,39 +6,23 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: polyrl-main
-    networks:
-      - polyrl-network
-    ports:
-      - "8080:8080"   # Expose ports as needed
-      - "7000:7000"   # Add more ports for your services
-      - "6000:6000"
+    network_mode: host
+    privileged: true
+    user: "0"
+    userns_mode: host
+    cap_add:
+      - IPC_LOCK
+    gpus: all
+    shm_size: 512g
+    ulimits:
+      memlock: -1
+      stack: 67108864
     volumes:
-      - ../:/workspace  # Mount host directory for development
+      - ../:/workspace/polyrl
+    working_dir: /workspace/polyrl
     environment:
-      - CUDA_VISIBLE_DEVICES=all
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     stdin_open: true
     tty: true
     command: /bin/bash
-
-  # Example of another service that can communicate with polyrl
-  redis:
-    image: redis:alpine
-    container_name: polyrl-redis
-    networks:
-      - polyrl-network
-    ports:
-      - "6379:6379"
-
-networks:
-  polyrl-network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16 

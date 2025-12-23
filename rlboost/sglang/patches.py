@@ -1,13 +1,27 @@
 import logging
 import types
 import os
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Callable
 from dataclasses import dataclass
-
-from rlboost.sglang.autopatch import BasePatch
 
 logger = logging.getLogger(__name__)
 
+class BasePatch:
+    """Lightweight base class for all runtime patches."""
+
+    def __init__(self):
+        self._patched_functions = {}
+
+    def _mark_as_patched(self, func: Callable, identifier: str):
+        marker = f"__rlboost_patched_{identifier}__"
+        setattr(func, marker, True)
+
+    def _is_patched(self, func: Callable, identifier: str) -> bool:
+        marker = f"__rlboost_patched_{identifier}__"
+        return hasattr(func, marker)
+
+    def apply(self) -> bool:
+        raise NotImplementedError
 
 class ServerArgsPatch(BasePatch):
     def apply(self) -> bool:

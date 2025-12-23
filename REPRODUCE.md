@@ -6,7 +6,10 @@ Step-by-step guide to reproduce the paper results.
 ### Clone repo
 
 ```bash
-git clone https://github.com/Terra-Flux/PolyRL.git --recursive
+git clone https://github.com/Terra-Flux/PolyRL.git --recursive polyrl
+cd polyrl
+# disable logging in veRL as it will impact performance
+sed -i 's/"log_level": "info",/# "log_level": "info",/' 3rdparty/verl/verl/workers/rollout/sglang_rollout/sglang_rollout.py
 git checkout artifact
 ```
 
@@ -68,6 +71,8 @@ docker run \
 
 > **NOTE:** All necessities for rollout is also included in the trainer image, but it is recommended to use a separate container for rollout.
 
+Python modules are installed in a virtual environment, enter venv by `source /opt/venv/bin/activate`.
+
 #### Local environment
 
 See [INSTALL.md](INSTALL.md) to install from source.
@@ -83,6 +88,8 @@ See [INSTALL.md](INSTALL.md) to install from source.
 Launch VeRL training:
 ```bash
 # machine A
+source /opt/venv/bin/activate
+cd /workspace/polyrl  # already set when using the Docker image
 bash examples/scripts/run_sync_grpo8b_default.sh
 ```
 
@@ -95,6 +102,7 @@ Multiplying by 8 for throughput of all GPUs, the overall throughput of VeRL is ~
 Train `Qwen3-8B` on OpenR1 with GRPO:
 ```bash
 # machine A
+source /opt/venv/bin/activate
 cd /workspace/polyrl  # already set when using the Docker image
 bash examples/scripts/run_async_grpo8b_pipeline.sh
 ```
@@ -105,6 +113,7 @@ start rollout workers on machine B.
 Default rollout manager port is 5000, replace `<MACHINE_A_IP>` with the IP address of machine A:
 ```bash
 # machine B
+source /opt/venv/bin/activate
 bash examples/scripts/launch_sglang_step.sh <MACHINE_A_IP> 5000
 ```
 
@@ -126,6 +135,7 @@ The improvement of cost efficiency (token per dollar) is around 60%.
 FluidRL handles preemptible resources. Besides `launch_sglang_step.sh`, you can start rollout workers manually:
 ```bash
 # machine B
+source /opt/venv/bin/activate
 bash examples/scripts/launch_sglang_8b.sh <MACHINE_A_IP> 5000 <API_PORT> <HANDSHAKE_PORT>
 ```
 

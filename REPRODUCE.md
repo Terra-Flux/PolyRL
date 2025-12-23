@@ -8,9 +8,9 @@ Step-by-step guide to reproduce the paper results.
 ```bash
 git clone https://github.com/Terra-Flux/PolyRL.git --recursive polyrl
 cd polyrl
+git checkout artifact
 # disable logging in veRL as it will impact performance
 sed -i 's/"log_level": "info",/# "log_level": "info",/' 3rdparty/verl/verl/workers/rollout/sglang_rollout/sglang_rollout.py
-git checkout artifact
 ```
 
 ### Hardware
@@ -126,6 +126,7 @@ You are expected to see `perf/throughput_all_gpus` (#rollout workers → through
 
 The average cost of standard H100x8 instance is $83.79 per hour, while spot ones are $21.28 per hour.
 The improvement of cost efficiency (token per dollar) is around 60%.
+You can also find the full trace in `/workspace/polyrl/tensorboard_log/verl_grpo_example/`. You can transfer that to your host and view by tensorboard.
 
 ### Demonstrate Preemption
 

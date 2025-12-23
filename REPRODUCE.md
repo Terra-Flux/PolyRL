@@ -37,7 +37,6 @@ docker build -t polyrl:rollout -f docker/Dockerfile.rollout .
 ```
 
 Run containers:
-> **NOTE:** The following command maps host dir to `/workspace/polyrl` inside the container, any change you made will reflect on the host side.
 
 ```bash
 # machine A
@@ -51,7 +50,6 @@ docker run \
   --cap-add=IPC_LOCK \
   --shm-size=2048g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -v "$(pwd)":/workspace/polyrl \
   -it --rm polyrl:trainer bash
 
 # machine B
@@ -65,7 +63,6 @@ docker run \
   --cap-add=IPC_LOCK \
   --shm-size=2048g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -v "$(pwd)":/workspace/polyrl \
   -it --rm polyrl:rollout bash
 ```
 

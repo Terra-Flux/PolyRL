@@ -52,6 +52,16 @@ docker exec -it polyrl-trainer bash
 
 Python modules are installed in a virtual environment, enter venv by `source /opt/venv/bin/activate`.
 
+### Installation Validation
+
+You can validate the installation by running
+```bash
+source /opt/venv/bin/activate
+bash examples/scripts/launch_sglang_test.sh
+```
+
+If you see `The server is fired up and ready to roll!`, the installation is successful.
+
 ### Launch Experiment
 
 Launch training engine:

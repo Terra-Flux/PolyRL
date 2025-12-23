@@ -76,8 +76,8 @@ See [INSTALL.md](INSTALL.md) to install from source.
 
 ### Dataset
 
-- Trainer Docker image downloads OpenR1 to `/workspace/polyrl/data/openr1` during build.
-- For a source install, download OpenR1 with `python examples/data_preprocess/openr1.py --local_dir ~/data/openr1`.
+- Trainer Docker image downloads OpenR1 to `/data/openr1` during build.
+- For a source install, download OpenR1 with `python examples/data_preprocess/openr1.py --local_dir <path>/data/openr1`.
 
 
 ### VeRL Training (baseline)

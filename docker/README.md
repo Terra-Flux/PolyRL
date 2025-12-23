@@ -1,6 +1,6 @@
 # PolyRL Trainer Container
 
-This image builds from `nvcr.io/nvidia/pytorch:25.05-py3`, copies the local workspace into `/workspace/polyrl`, installs Rust, and installs PolyRL and its dependencies with `uv`.
+This image builds from `nvcr.io/nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04`, copies the local workspace into `/workspace/polyrl`, installs Rust, and installs PolyRL and its dependencies with `uv`.
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ Run from the repo root (Dockerfiles are under `docker/`):
 
 ## Run (one-shot)
 
-Trainer example (GPU, large shm, privileged, bind current repo for live edits):
+Trainer example (GPU, large shm, privileged):
 
 ```bash
 docker run \
@@ -32,15 +32,13 @@ docker run \
   --network=host \
   --userns=host \
   --cap-add=IPC_LOCK \
-  --shm-size=512g \
+  --shm-size=2048g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -v "$(pwd)":/workspace/polyrl \
   -it --rm polyrl:trainer bash
 ```
 
 Notes:
-- If you don't want to bind your current repo for live edits, remove `-v "$(pwd)":/workspace/polyrl`.
-- Requires a large shared memory segment (512GB recommended `--shm-size=512g`).
+- Requires a large shared memory segment (2048GB recommended `--shm-size=2048g`).
 - For maximal IPC sharing, you can add `--ipc=host`.
 
 Rollout engine example (no Rust/Verl/OpenR1 baked in):
@@ -49,19 +47,17 @@ Rollout engine example (no Rust/Verl/OpenR1 baked in):
 docker run \
   --name polyrl-rollout \
   --gpus all \
+  --privileged \
+  -u 0 \
   --network=host \
   --userns=host \
-  --shm-size=64g \
+  --cap-add=IPC_LOCK \
+  --shm-size=2048g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -v "$(pwd)":/workspace/polyrl \
   -it --rm polyrl:rollout bash
 ```
 
-Notes:
-- Adjust `--shm-size` based on rollout needs; 64GB is a starting point.
-- Add `--ipc=host` and `--cap-add=IPC_LOCK` if your rollout config requires them.
-
-## Run with docker-compose
+## Run with docker-compose (Deprecated)
 
 Also from repo root:
 
@@ -73,4 +69,4 @@ The compose file bakes in the same options as the one-shot command: GPUs, privil
 
 ## Dataset (OpenR1)
 
-PolyRL expects the OpenR1 dataset to be available. The trainer Docker build downloads it automatically to `/workspace/polyrl/data/openr1` via `examples/data_preprocess/openr1.py`. If you prefer a different location, edit `docker/Dockerfile` to change the `--local_dir` path. The rollout image does not download this dataset.
+PolyRL expects the OpenR1 dataset to be available. The trainer Docker build downloads it automatically to `/data/openr1` via `examples/data_preprocess/openr1.py`. If you prefer a different location, edit `docker/Dockerfile` to change the `--local_dir` path. The rollout image does not download this dataset.

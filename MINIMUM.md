@@ -1,7 +1,7 @@
 # Minimum Setup
 
 Step-by-step guide to validate basic funtionality of FluidRL. 
-> NOTE: this is just a minimum toy example, its performance won't reflect the real performance of FluidRL.
+> NOTE: this is just a minimum toy example, its performance doesn't reflect the real performance of FluidRL.
 
 ### Clone repo
 
@@ -22,7 +22,7 @@ Assume at least **a 4 GPUs instance** with >=40GB VRAM each.
 #### Docker
 
 Install Docker and [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html#with-apt-ubuntu-debian).
-For explanations, refer to [polyrl-docker](docker/README.md).
+For explanations, refer to [docker](docker/README.md).
 
 Build images:
 ```bash
@@ -59,7 +59,11 @@ Launch training engine:
 bash examples/scripts/run_async_grpo_pipeline_mini.sh
 ```
 
-When you see prompt like: <font color="red"> [SGLangRollout] Rollout manager is ready at http://xxx.xxx.xxx.xxx:5000 </font>, start rollout engines.
+When you see the following prompt in red 🔴: 
+```bash
+[SGLangRollout] Rollout manager is ready at http://xxx.xxx.xxx.xxx:5000
+```
+Start rollout engines.
 
 Launch the first rollout engine:
 ```bash

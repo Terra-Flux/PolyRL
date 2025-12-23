@@ -18,7 +18,7 @@ sed -i 's/"log_level": "info",/# "log_level": "info",/' 3rdparty/verl/verl/worke
 Assume at least **two H100x8 instances**:
 - Machine A: trainer.
 - Machine B: emulates four rollout engines on preemptible instances.
-- Network: 200+ Gbps egress host network on Machine A. This is common for Cloud providers like AWS and GCP.
+- Network: 200+ Gbps host network. This is common for Cloud providers like AWS and GCP.
 
 ### Environment Setup
 
@@ -105,9 +105,14 @@ bash examples/scripts/run_async_grpo8b_pipeline.sh
 ```
 
 Trainer initialization takes time on first run. 
-When the rollout manager is ready ( <font color="red"> when seeing red prompts on the trainer</font>), 
+
+When you see the following prompt in red 🔴: 
+```bash
+[SGLangRollout] Rollout manager is ready at http://xxx.xxx.xxx.xxx:5000
+```
 start rollout workers on machine B. 
-Default rollout manager port is 5000, replace `<MACHINE_A_IP>` with the IP address of machine A:
+
+Default rollout manager port is 5000, replace `<MACHINE_A_IP>` with the IP address of machine A (check by `hostname -i`):
 ```bash
 # machine B
 source /opt/venv/bin/activate
@@ -146,7 +151,7 @@ CUDA_VISIBLE_DEVICES=4,5 bash examples/scripts/launch_sglang_8b.sh 192.168.0.1 5
 ...
 ```
 
-Use `Ctrl+C` to stop a rollout worker when it is still generating responses; the rollout manager will automatically migrate requests to remaining workers.
+Use `Ctrl+C` to stop a rollout worker **when it is still generating responses**; the rollout manager will automatically migrate requests to remaining workers.
 
 > **IMPORTANT:** This version of FluidRL cannot handle zero rollout workers; that support is planned for v0.1.0.
 
@@ -159,4 +164,4 @@ Use `Ctrl+C` to stop a rollout worker when it is still generating responses; the
 
 ### Known issues
 1. When encounter OOM issue, clean up `dev/shm/*`.
-2. When encounter `libcuda.so not found`, it usually due to ldconfig is searching a wrong pass. Find the correct path by `find /usr -name 'libcuda.so'` and run `ldconfig <parent dir of libcuda.so>` to add the path.
+2. When encounter `libcuda.so not found`, it usually due to ldconfig is searching a wrong path. Find the correct path by `find /usr -name 'libcuda.so'` and run `ldconfig <parent dir of libcuda.so>` to add the path.

@@ -119,18 +119,24 @@ source /opt/venv/bin/activate
 bash examples/scripts/launch_sglang_step.sh <MACHINE_A_IP> 5000
 ```
 
-The script launches one rollout worker every 1800 seconds (30 minutes); after four are up, 
-it retires the oldest every 1800 seconds. 
+The script simulates a cluster with dynamic spot instance availability, which does the following:
+1. It launches one rollout worker every 1800 seconds (30 minutes).
+2. When there are four workers are up, it will kill the oldest worker.
+3. After 1800s, it will launch a new worker.
+4. Repeat step 2 and 3.
+
 Rollout workers join/leave seamlessly, which is handled by the rollout manager of FluidRL.
 
 You are expected to see `perf/throughput_all_gpus` (#rollout workers → throughput):
-- 1 → ~12,000 token/s
-- 2 → ~14,000 token/s
-- 3 → ~16,000 token/s
-- 4 → ~18,000 token/s
+- 0-30min: 1 → ~12,000 token/s (the throughput can be lower (~9000 token/s) at the beginning as the workload balancer is warming up)
+- 30-60min: 2 → ~14,000 token/s
+- 60-90min: 3 → ~16,000 token/s
+- 90-120min: 4 → ~18,000 token/s
+
+After 2 hours, the throughput will oscillate between 16,000 and 18,000 token/s.
 
 The average cost of standard H100x8 instance is $83.79 per hour, while spot ones are $21.28 per hour.
-The improvement of cost efficiency (token per dollar) is around 60%.
+The improvement of cost efficiency (token per dollar) is around 40-50%.
 You can also find the full trace in `/workspace/polyrl/tensorboard_log/verl_grpo_example/`. You can transfer that to your host and view by tensorboard.
 
 ### Demonstrate Preemption
@@ -151,7 +157,7 @@ CUDA_VISIBLE_DEVICES=4,5 bash examples/scripts/launch_sglang_8b.sh 192.168.0.1 5
 ...
 ```
 
-Use `Ctrl+C` to stop a rollout worker **when it is still generating responses**; the rollout manager will automatically migrate requests to remaining workers.
+To observe live request migration, use `Ctrl+C` to stop a rollout worker **when it is still generating responses**; the rollout manager will automatically migrate requests to remaining workers. You need to press `Ctrl+C` multiple times to skip graceful shutdown.
 
 > **IMPORTANT:** This version of FluidRL cannot handle zero rollout workers; that support is planned for v0.1.0.
 

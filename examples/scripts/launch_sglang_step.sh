@@ -70,6 +70,7 @@ main() {
   while true; do
     if ((${#PIDS[@]} >= MAX_INSTANCES)); then
       stop_oldest
+      sleep "${LAUNCH_INTERVAL}"
     fi
 
     start_instance $((slot % MAX_INSTANCES))

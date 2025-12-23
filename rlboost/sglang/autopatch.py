@@ -93,8 +93,8 @@ try:
         results = manager.apply_all()
         log_patch_results(results)
 
-except ImportError:
-    logger.warning("wrapt not installed, autopatch disabled")
+except ImportError as e:
+    logger.warning(f"Error when applying rlboost patches to sglang: {e}, autopatch disabled")
 
 
 def apply_patches():

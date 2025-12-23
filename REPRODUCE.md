@@ -2,6 +2,14 @@
 
 Step-by-step guide to reproduce the paper results.
 
+
+### Clone repo
+
+```bash
+git clone https://github.com/Terra-Flux/PolyRL.git --recursive
+git checkout artifact
+```
+
 ### Hardware
 
 Assume at least **two H100x8 instances**:
@@ -26,6 +34,8 @@ docker build -t polyrl:rollout -f docker/Dockerfile.rollout .
 ```
 
 Run containers:
+> **NOTE:** The following command maps host dir to `/workspace/polyrl` inside the container, any change you made will reflect on the host side.
+
 ```bash
 # machine A
 docker run \
@@ -36,7 +46,7 @@ docker run \
   --network=host \
   --userns=host \
   --cap-add=IPC_LOCK \
-  --shm-size=512g \
+  --shm-size=2048g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
   -v "$(pwd)":/workspace/polyrl \
   -it --rm polyrl:trainer bash
@@ -50,7 +60,7 @@ docker run \
   --network=host \
   --userns=host \
   --cap-add=IPC_LOCK \
-  --shm-size=512 \
+  --shm-size=2048g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
   -v "$(pwd)":/workspace/polyrl \
   -it --rm polyrl:rollout bash
@@ -136,4 +146,9 @@ Use `Ctrl+C` to stop a rollout worker when it is still generating responses; the
 ### Optimizations
 
 1. To use high-speed network interface to transfer weights, specify the range of IP addresses of the rollout workers in `allowed_sender_ips` in [`rollout-manager/config.toml`](rollout-manager/config.toml).
-2. If the baseline throughput is lower than expected, comment out `"log_level": "info",` in [sglang_rollout.py#L461](3rdparty/verl/verl/workers/rollout/sglang_rollout/sglang_rollout.py#L461)
+2. If the baseline throughput is lower than expected, comment out `"log_level": "info",` in [sglang_rollout.py#L461](https://github.com/volcengine/verl/blob/0eb50ec4a33cda97e05ed8caab9c7f17a30c05a9/verl/workers/rollout/sglang_rollout/sglang_rollout.py#L461)
+
+
+### Known issues
+1. When encounter OOM issue, clean up `dev/shm/*`.
+2. When encounter `libcuda.so not found`, it usually due to ldconfig is searching a wrong pass. Find the correct path by `find /usr -name 'libcuda.so'` and run `ldconfig <parent dir of libcuda.so>` to add the path.

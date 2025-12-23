@@ -34,7 +34,7 @@ RUN python3 -m venv /opt/venv && \
     cd /workspace/polyrl && uv pip install -e .
 
 # Pre-download OpenR1 data needed by PolyRL
-RUN mkdir -p /workspace/polyrl/data/openr1 && \
-    python examples/data_preprocess/openr1.py --local_dir /workspace/polyrl/data/openr1
+RUN mkdir -p /data/openr1 && \
+    python examples/data_preprocess/openr1.py --local_dir /data/openr1
 
 CMD ["/bin/bash"]

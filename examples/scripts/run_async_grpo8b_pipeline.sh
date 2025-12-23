@@ -3,7 +3,7 @@
 ulimit -n 65536  # Increase max open files
 
 # Set dataset directory - use environment variable OPENR1_DATA_DIR if set, otherwise use default
-OPENR1_DATA_DIR=${OPENR1_DATA_DIR:-"/workspace/polyrl/data/openr1"}
+OPENR1_DATA_DIR=${OPENR1_DATA_DIR:-"/data/openr1"}
 # Choose from sglang, sglang-disaggregated
 ROLLOUT_NAME=${ROLLOUT_NAME:-"sglang-disaggregated"}
 

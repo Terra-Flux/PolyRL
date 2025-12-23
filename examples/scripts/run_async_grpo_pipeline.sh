@@ -3,7 +3,7 @@
 ulimit -n 65536  # Increase max open files
 
 # Set dataset directory - use environment variable RL_DATA_DIR if set, otherwise use default
-RL_DATA_DIR=${RL_DATA_DIR:-"~/data/openr1"}
+RL_DATA_DIR=${RL_DATA_DIR:-"/data/openr1"}
 ROLLOUT_NAME=${ROLLOUT_NAME:-"sglang-disaggregated"}
 
 EXP_NAME="qwen3_1.7b_polyrl_grpo"
